@@ -1,0 +1,7 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "method": "kmeans",
+  "n_clusters_requested": 6,
+  "n_clusters_found": 6,
+  "silhouette_score": 0.31839919090270996
+}

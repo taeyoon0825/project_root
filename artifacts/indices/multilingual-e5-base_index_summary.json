@@ -1,0 +1,9 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "model_name": "intfloat/multilingual-e5-base",
+  "embedding_path": "C:\\Users\\USER\\Desktop\\project_root\\artifacts\\embeddings\\multilingual-e5-base_embeddings.npy",
+  "metadata_path": "C:\\Users\\USER\\Desktop\\project_root\\artifacts\\embeddings\\multilingual-e5-base_metadata.csv",
+  "faiss_index_path": "C:\\Users\\USER\\Desktop\\project_root\\artifacts\\indices\\multilingual-e5-base.faiss",
+  "dimension": 768,
+  "document_count": 100
+}

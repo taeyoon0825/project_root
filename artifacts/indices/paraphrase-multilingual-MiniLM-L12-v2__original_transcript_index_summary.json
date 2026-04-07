@@ -1,0 +1,10 @@
+{
+  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
+  "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "text_source": "original_transcript",
+  "embedding_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\paraphrase-multilingual-MiniLM-L12-v2__original_transcript_embeddings.npy",
+  "metadata_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\paraphrase-multilingual-MiniLM-L12-v2__original_transcript_metadata.csv",
+  "faiss_index_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\indices\\paraphrase-multilingual-MiniLM-L12-v2__original_transcript.faiss",
+  "dimension": 384,
+  "document_count": 100
+}

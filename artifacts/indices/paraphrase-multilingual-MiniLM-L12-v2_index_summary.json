@@ -1,0 +1,9 @@
+{
+  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
+  "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "embedding_path": "C:\\Users\\USER\\Desktop\\project_root\\artifacts\\embeddings\\paraphrase-multilingual-MiniLM-L12-v2_embeddings.npy",
+  "metadata_path": "C:\\Users\\USER\\Desktop\\project_root\\artifacts\\embeddings\\paraphrase-multilingual-MiniLM-L12-v2_metadata.csv",
+  "faiss_index_path": "C:\\Users\\USER\\Desktop\\project_root\\artifacts\\indices\\paraphrase-multilingual-MiniLM-L12-v2.faiss",
+  "dimension": 384,
+  "document_count": 100
+}

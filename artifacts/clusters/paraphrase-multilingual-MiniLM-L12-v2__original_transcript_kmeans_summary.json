@@ -1,0 +1,8 @@
+{
+  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
+  "text_source": "original_transcript",
+  "method": "kmeans",
+  "n_clusters_requested": 6,
+  "n_clusters_found": 6,
+  "silhouette_score": 0.24441564083099365
+}

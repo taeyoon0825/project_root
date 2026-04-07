@@ -1,0 +1,17 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "explained_variance_ratio": [
+    0.16585783660411835,
+    0.11482135206460953,
+    0.11011020094156265
+  ],
+  "components_shape": [
+    3,
+    768
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.16585783660411835,
+    "PC2": 0.11482135206460953,
+    "PC3": 0.11011020094156265
+  }
+}

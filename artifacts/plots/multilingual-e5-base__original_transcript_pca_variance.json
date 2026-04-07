@@ -1,0 +1,19 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "text_source": "original_transcript",
+  "explained_variance_ratio": [
+    0.2004050761461258,
+    0.1081763356924057,
+    0.10504535585641861
+  ],
+  "components_shape": [
+    3,
+    768
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.2004050761461258,
+    "PC2": 0.1081763356924057,
+    "PC3": 0.10504535585641861
+  },
+  "cumulative_first3": 0.4136267602443695
+}

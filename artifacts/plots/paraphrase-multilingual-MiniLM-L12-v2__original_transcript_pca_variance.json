@@ -1,0 +1,19 @@
+{
+  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
+  "text_source": "original_transcript",
+  "explained_variance_ratio": [
+    0.19021092355251312,
+    0.13817477226257324,
+    0.11017730087041855
+  ],
+  "components_shape": [
+    3,
+    384
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.19021092355251312,
+    "PC2": 0.13817477226257324,
+    "PC3": 0.11017730087041855
+  },
+  "cumulative_first3": 0.4385630190372467
+}
