@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local caches
+.cache/
+.ipynb_checkpoints/
+
+# Environment / local config
+.env
+.env.*
+.python-version
+.streamlit/secrets.toml
+
+# OS / editor files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
+
+# Logs / temp files
+*.log
+*.tmp
+*.temp
+
+# Generated datasets and audio outputs
+data/raw/
+data/processed/
+data/audio/
+data/metadata/
+
+# Generated experiment artifacts
+artifacts/
+
+# Large model / index / binary artifacts
+*.pt
+*.bin
+*.safetensors
+*.npy
+*.npz
+*.faiss
+*.joblib
+
+# Media outputs
+*.wav
+*.mp3
+*.m4a
+*.flac
+
