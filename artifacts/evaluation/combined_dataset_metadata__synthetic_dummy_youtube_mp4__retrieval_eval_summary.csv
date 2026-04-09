@@ -1,0 +1,9 @@
+﻿system_name,system_type,text_source,top1_accuracy,top3_accuracy,silhouette_score
+keyword-bm25,keyword,stt_transcript,1.0,1.0,
+keyword-tfidf,keyword,stt_transcript,1.0,1.0,
+paraphrase-multilingual-MiniLM-L12-v2,dense,stt_transcript,0.9166666666666666,1.0,0.21910318732261658
+multilingual-e5-base,dense,stt_transcript,0.9166666666666666,1.0,0.22697663307189941
+keyword-bm25,keyword,original_transcript,0.9166666666666666,0.9166666666666666,
+keyword-tfidf,keyword,original_transcript,1.0,1.0,
+paraphrase-multilingual-MiniLM-L12-v2,dense,original_transcript,0.75,0.9166666666666666,
+multilingual-e5-base,dense,original_transcript,1.0,1.0,

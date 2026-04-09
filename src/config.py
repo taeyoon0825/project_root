@@ -12,9 +12,15 @@ AUX_CACHE_DIR = PROJECT_ROOT / ".cache"
 WHISPER_CACHE_DIR = AUX_CACHE_DIR / "whisper"
 HF_CACHE_DIR = AUX_CACHE_DIR / "huggingface"
 AUDIO_DIR = DATA_DIR / "audio"
+AUDIO_MP4_DIR = AUDIO_DIR / "mp4"
 AUDIO_WAV_DIR = AUDIO_DIR / "wav"
 AUDIO_TMP_DIR = AUDIO_DIR / "tmp"
 AUDIO_STT_DIR = AUDIO_DIR / "stt_txt"
+TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+
+YOUTUBE_MP4_INPUT_DIR = AUDIO_MP4_DIR
+YOUTUBE_WAV_DIR = AUDIO_WAV_DIR / "youtube_mp4"
+YOUTUBE_TRANSCRIPTS_DIR = TRANSCRIPTS_DIR / "youtube_mp4"
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 EMBEDDINGS_DIR = ARTIFACTS_DIR / "embeddings"
@@ -24,6 +30,8 @@ CLUSTERS_DIR = ARTIFACTS_DIR / "clusters"
 EVALUATION_DIR = ARTIFACTS_DIR / "evaluation"
 
 DEFAULT_METADATA_CSV = METADATA_DIR / "dataset_metadata.csv"
+REALDATA_METADATA_CSV = METADATA_DIR / "youtube_mp4_metadata.csv"
+COMBINED_METADATA_CSV = METADATA_DIR / "combined_dataset_metadata.csv"
 DEFAULT_QUERYSET_CSV = METADATA_DIR / "evaluation_queries.csv"
 
 EMBEDDING_MODELS = {
@@ -46,9 +54,13 @@ def ensure_project_dirs() -> None:
         WHISPER_CACHE_DIR,
         HF_CACHE_DIR,
         AUDIO_DIR,
+        AUDIO_MP4_DIR,
         AUDIO_WAV_DIR,
         AUDIO_TMP_DIR,
         AUDIO_STT_DIR,
+        TRANSCRIPTS_DIR,
+        YOUTUBE_WAV_DIR,
+        YOUTUBE_TRANSCRIPTS_DIR,
         ARTIFACTS_DIR,
         EMBEDDINGS_DIR,
         INDICES_DIR,

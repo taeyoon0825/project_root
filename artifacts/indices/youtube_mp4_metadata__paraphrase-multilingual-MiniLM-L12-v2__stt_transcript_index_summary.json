@@ -1,0 +1,11 @@
+{
+  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
+  "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "text_source": "stt_transcript",
+  "artifact_namespace": "youtube_mp4_metadata",
+  "embedding_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\youtube_mp4_metadata__paraphrase-multilingual-MiniLM-L12-v2__stt_transcript_embeddings.npy",
+  "metadata_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\youtube_mp4_metadata__paraphrase-multilingual-MiniLM-L12-v2__stt_transcript_metadata.csv",
+  "faiss_index_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\indices\\youtube_mp4_metadata__paraphrase-multilingual-MiniLM-L12-v2__stt_transcript.faiss",
+  "dimension": 384,
+  "document_count": 1
+}

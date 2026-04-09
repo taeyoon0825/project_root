@@ -1,0 +1,20 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "text_source": "stt_transcript",
+  "artifact_namespace": "combined_dataset_metadata__youtube_mp4",
+  "explained_variance_ratio": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "components_shape": [
+    0,
+    0
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.0,
+    "PC2": 0.0,
+    "PC3": 0.0
+  },
+  "cumulative_first3": 0.0
+}

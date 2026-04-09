@@ -1,0 +1,32 @@
+{
+  "method": [
+    "bm25",
+    "tfidf"
+  ],
+  "text_source": "stt_transcript",
+  "document_count": 111,
+  "columns": [
+    "id",
+    "category",
+    "title",
+    "file_name",
+    "file_path",
+    "processed_txt_path",
+    "original_transcript",
+    "stt_transcript",
+    "keywords",
+    "tts_text",
+    "audio_file_name",
+    "audio_file_path",
+    "stt_txt_path",
+    "tts_provider",
+    "stt_model_name",
+    "source_type",
+    "audio_path",
+    "processing_status",
+    "error_message",
+    "primary_text",
+    "search_text"
+  ],
+  "artifact_namespace": "combined_dataset_metadata__synthetic_dummy_youtube_mp4"
+}

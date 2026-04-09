@@ -1,0 +1,20 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "text_source": "stt_transcript",
+  "artifact_namespace": "combined_dataset_metadata",
+  "explained_variance_ratio": [
+    0.22690685093402863,
+    0.10433498024940491,
+    0.0637434870004654
+  ],
+  "components_shape": [
+    3,
+    768
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.22690685093402863,
+    "PC2": 0.10433498024940491,
+    "PC3": 0.0637434870004654
+  },
+  "cumulative_first3": 0.3949853181838989
+}

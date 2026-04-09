@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,14 @@ from src.search.keyword_search import KeywordSearchEngine
 from src.search.text_source import DEFAULT_TEXT_SOURCE
 from src.utils.io_utils import save_dataframe, save_json
 from src.visualize.clustering import load_cluster_summary
+
+
+def evaluation_artifact_path(filename: str, artifact_namespace: str | None = None) -> Path:
+    if not artifact_namespace:
+        return EVALUATION_DIR / filename
+    safe_namespace = re.sub(r"[^0-9A-Za-z._-]+", "_", artifact_namespace).strip("._")
+    prefix = f"{safe_namespace}__" if safe_namespace else ""
+    return EVALUATION_DIR / f"{prefix}{filename}"
 
 
 def _topk_hit(results: pd.DataFrame, target_category: str, k: int) -> int:
@@ -64,8 +73,9 @@ def evaluate_dense_engine(
     metadata: pd.DataFrame,
     model_alias: str,
     text_source: str,
+    artifact_namespace: str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    engine = DenseSearchEngine(metadata, model_alias, text_source=text_source)
+    engine = DenseSearchEngine(metadata, model_alias, text_source=text_source, artifact_namespace=artifact_namespace)
     engine.load()
     rows = []
 
@@ -88,10 +98,15 @@ def evaluate_dense_engine(
 
     frame = pd.DataFrame(rows)
     try:
-        cluster_summary = load_cluster_summary(model_alias, text_source=text_source, method="kmeans")
-        silhouette_score = cluster_summary.get("silhouette_score")
+        cluster_summary = load_cluster_summary(
+            model_alias,
+            text_source=text_source,
+            method="kmeans",
+            artifact_namespace=artifact_namespace,
+        )
+        silhouette = cluster_summary.get("silhouette_score")
     except Exception:
-        silhouette_score = None
+        silhouette = None
 
     summary = {
         "system_name": model_alias,
@@ -99,12 +114,19 @@ def evaluate_dense_engine(
         "text_source": text_source,
         "top1_accuracy": float(frame["top1_hit"].mean()),
         "top3_accuracy": float(frame["top3_hit"].mean()),
-        "silhouette_score": silhouette_score,
+        "silhouette_score": silhouette,
     }
     return frame, summary
 
 
 def build_source_comparison(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return pd.DataFrame(
+            columns=[
+                "system_name",
+                "system_type",
+            ]
+        )
     base = summary[["system_name", "system_type", "text_source", "top1_accuracy", "top3_accuracy"]].copy()
     pivot = base.pivot_table(
         index=["system_name", "system_type"],
@@ -124,15 +146,65 @@ def build_source_comparison(summary: pd.DataFrame) -> pd.DataFrame:
     return pivot
 
 
+def _empty_eval_outputs(artifact_namespace: str | None = None) -> dict[str, pd.DataFrame]:
+    detail = pd.DataFrame(
+        columns=[
+            "system_name",
+            "system_type",
+            "text_source",
+            "query_id",
+            "query",
+            "target_category",
+            "top1_hit",
+            "top3_hit",
+            "top1_id",
+            "top1_category",
+        ]
+    )
+    summary = pd.DataFrame(
+        columns=[
+            "system_name",
+            "system_type",
+            "text_source",
+            "top1_accuracy",
+            "top3_accuracy",
+            "silhouette_score",
+        ]
+    )
+    comparison = build_source_comparison(summary)
+
+    save_dataframe(evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace), detail)
+    save_dataframe(evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace), summary)
+    save_dataframe(evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace), comparison)
+    save_json(
+        evaluation_artifact_path("retrieval_eval_summary.json", artifact_namespace),
+        [],
+    )
+    return {"detail": detail, "summary": summary, "comparison": comparison}
+
+
 def evaluate_all(
     metadata_path: Path = DEFAULT_METADATA_CSV,
     queryset_path: Path = DEFAULT_QUERYSET_CSV,
     text_sources: tuple[str, ...] = ("stt_transcript", "original_transcript"),
     include_optional: bool = False,
+    artifact_namespace: str | None = None,
+    metadata: pd.DataFrame | None = None,
+    queryset: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
     ensure_project_dirs()
-    metadata = load_metadata_frame(metadata_path)
-    queryset = pd.read_csv(queryset_path)
+    metadata = metadata.copy() if metadata is not None else load_metadata_frame(metadata_path)
+    queryset = queryset.copy() if queryset is not None else pd.read_csv(queryset_path)
+
+    if metadata.empty or queryset.empty:
+        return _empty_eval_outputs(artifact_namespace)
+
+    available_categories = set(metadata["category"].dropna().astype(str))
+    if "target_category" in queryset.columns:
+        queryset = queryset.loc[queryset["target_category"].astype(str).isin(available_categories)].reset_index(drop=True)
+
+    if queryset.empty:
+        return _empty_eval_outputs(artifact_namespace)
 
     detail_frames = []
     summary_rows = []
@@ -144,7 +216,13 @@ def evaluate_all(
             summary_rows.append(summary)
 
         for model_alias in list(list_available_models(include_optional=include_optional).keys()):
-            detail_frame, summary = evaluate_dense_engine(queryset, metadata, model_alias, text_source)
+            detail_frame, summary = evaluate_dense_engine(
+                queryset,
+                metadata,
+                model_alias,
+                text_source,
+                artifact_namespace=artifact_namespace,
+            )
             detail_frames.append(detail_frame)
             summary_rows.append(summary)
 
@@ -152,10 +230,13 @@ def evaluate_all(
     summary = pd.DataFrame(summary_rows)
     comparison = build_source_comparison(summary)
 
-    save_dataframe(EVALUATION_DIR / "retrieval_eval_detail.csv", detail)
-    save_dataframe(EVALUATION_DIR / "retrieval_eval_summary.csv", summary)
-    save_dataframe(EVALUATION_DIR / "retrieval_eval_source_comparison.csv", comparison)
-    save_json(EVALUATION_DIR / "retrieval_eval_summary.json", summary.to_dict(orient="records"))
+    save_dataframe(evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace), detail)
+    save_dataframe(evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace), summary)
+    save_dataframe(evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace), comparison)
+    save_json(
+        evaluation_artifact_path("retrieval_eval_summary.json", artifact_namespace),
+        summary.to_dict(orient="records"),
+    )
     return {"detail": detail, "summary": summary, "comparison": comparison}
 
 
@@ -163,6 +244,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate retrieval systems on sample query set.")
     parser.add_argument("--metadata-path", type=Path, default=DEFAULT_METADATA_CSV)
     parser.add_argument("--queryset-path", type=Path, default=DEFAULT_QUERYSET_CSV)
+    parser.add_argument("--artifact-namespace", type=str, default=None)
     parser.add_argument(
         "--text-sources",
         nargs="+",
@@ -177,6 +259,7 @@ def main() -> None:
         args.queryset_path,
         text_sources=tuple(args.text_sources),
         include_optional=args.include_optional,
+        artifact_namespace=args.artifact_namespace,
     )
     print(outputs["summary"].to_string(index=False))
 

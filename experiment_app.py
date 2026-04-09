@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src.config import CLUSTERS_DIR, DEFAULT_METADATA_CSV, DEFAULT_QUERYSET_CSV, EVALUATION_DIR
-from src.data.metadata_schema import load_metadata_frame
-from src.embedding.build_indices import DenseSearchEngine
+from src.config import CLUSTERS_DIR
+from src.embedding.build_indices import DenseSearchEngine, artifact_stem
 from src.embedding.vector_models import list_available_models
+from src.evaluation.evaluate import evaluate_all, evaluation_artifact_path
 from src.search.keyword_search import KeywordSearchEngine
+from src.search.load_realdata_dataset import (
+    available_dataset_options,
+    dataset_artifact_namespace,
+    default_search_metadata_path,
+    load_search_metadata,
+    resolve_dataset_path,
+)
 from src.search.text_source import resolve_primary_text, split_text_into_lines
 from src.utils.io_utils import load_json
 from src.visualize.clustering import load_representatives
@@ -19,8 +27,9 @@ from src.visualize.interactive_plot import (
     load_projection_frame,
     project_query_vector,
     projection_artifact_path,
-    projection_columns,
 )
+from src.visualize.pca_plot import build_projection_artifacts
+from src.visualize.clustering import cluster_embeddings
 
 
 PLOT_MODE_OPTIONS = {
@@ -36,61 +45,167 @@ PLOT_MODE_OPTIONS = {
 st.set_page_config(page_title="Audio STT Retrieval Experiment", layout="wide")
 
 
+def dataset_refresh_token(dataset_key: str) -> str:
+    metadata_path = resolve_dataset_path(dataset_key)
+    if not metadata_path.exists():
+        return str(metadata_path)
+    stat = metadata_path.stat()
+    return f"{metadata_path}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def metadata_content_token(metadata: pd.DataFrame, text_source: str) -> str:
+    digest = hashlib.sha1()
+    digest.update(text_source.encode("utf-8"))
+    if metadata.empty:
+        digest.update(b"__empty__")
+        return digest.hexdigest()
+
+    primary_texts = metadata.apply(lambda row: resolve_primary_text(row, text_source=text_source), axis=1)
+    for doc_id, primary_text in zip(metadata["id"].astype(str).tolist(), primary_texts.astype(str).tolist()):
+        digest.update(doc_id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(primary_text.encode("utf-8", errors="ignore"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def evaluation_content_token(metadata: pd.DataFrame, queryset: pd.DataFrame) -> str:
+    digest = hashlib.sha1()
+    digest.update(b"evaluation")
+
+    if metadata.empty:
+        digest.update(b"__empty_metadata__")
+    else:
+        for row in metadata.fillna("").itertuples(index=False):
+            digest.update(str(getattr(row, "id", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+            digest.update(str(getattr(row, "source_type", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+            digest.update(str(getattr(row, "category", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+            digest.update(str(getattr(row, "stt_transcript", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+            digest.update(str(getattr(row, "original_transcript", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\n")
+
+    if queryset.empty:
+        digest.update(b"__empty_queryset__")
+    else:
+        for row in queryset.fillna("").itertuples(index=False):
+            digest.update(str(getattr(row, "query_id", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+            digest.update(str(getattr(row, "query", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
+            digest.update(str(getattr(row, "target_category", "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\n")
+
+    return digest.hexdigest()
+
+
+def artifact_ids_match(csv_path: Path, metadata: pd.DataFrame) -> bool:
+    if not csv_path.exists():
+        return False
+    try:
+        artifact_ids = pd.read_csv(csv_path, usecols=["id"])["id"].fillna("").astype(str).tolist()
+    except Exception:
+        return False
+    expected_ids = metadata["id"].fillna("").astype(str).tolist()
+    return artifact_ids == expected_ids
+
+
 @st.cache_data
-def load_metadata() -> pd.DataFrame:
-    return load_metadata_frame(DEFAULT_METADATA_CSV)
+def load_metadata_for_app(
+    dataset_key: str,
+    source_types: tuple[str, ...],
+    refresh_token: str,
+) -> tuple[pd.DataFrame, str]:
+    _ = refresh_token
+    metadata, metadata_path = load_search_metadata(dataset_key, source_types or None)
+    return metadata, str(metadata_path)
 
 
 @st.cache_data
 def load_queries() -> pd.DataFrame:
-    return pd.read_csv(DEFAULT_QUERYSET_CSV)
+    from src.config import DEFAULT_QUERYSET_CSV
+
+    if DEFAULT_QUERYSET_CSV.exists():
+        return pd.read_csv(DEFAULT_QUERYSET_CSV)
+    return pd.DataFrame(columns=["query_id", "query", "target_category"])
 
 
 @st.cache_data
-def load_pca_variance(model_alias: str, text_source: str) -> dict:
+def load_pca_variance(model_alias: str, text_source: str, artifact_namespace: str) -> dict:
     from src.config import PLOTS_DIR
-    from src.embedding.build_indices import artifact_stem
 
-    return load_json(PLOTS_DIR / f"{artifact_stem(model_alias, text_source)}_pca_variance.json")
-
-
-@st.cache_data
-def load_cluster_frame(model_alias: str, text_source: str, method: str = "kmeans") -> pd.DataFrame:
-    from src.embedding.build_indices import artifact_stem
-
-    return pd.read_csv(CLUSTERS_DIR / f"{artifact_stem(model_alias, text_source)}_{method}_clusters.csv")
+    return load_json(PLOTS_DIR / f"{artifact_stem(model_alias, text_source, artifact_namespace)}_pca_variance.json")
 
 
 @st.cache_data
-def load_cluster_summary(model_alias: str, text_source: str, method: str = "kmeans") -> dict:
-    from src.embedding.build_indices import artifact_stem
+def load_cluster_frame(model_alias: str, text_source: str, method: str, artifact_namespace: str) -> pd.DataFrame:
+    from src.visualize.clustering import load_cluster_frame as _load_cluster_frame
 
-    return load_json(CLUSTERS_DIR / f"{artifact_stem(model_alias, text_source)}_{method}_summary.json")
-
-
-@st.cache_data
-def load_eval_summary() -> pd.DataFrame:
-    return pd.read_csv(EVALUATION_DIR / "retrieval_eval_summary.csv")
+    return _load_cluster_frame(model_alias, text_source=text_source, method=method, artifact_namespace=artifact_namespace)
 
 
 @st.cache_data
-def load_eval_detail() -> pd.DataFrame:
-    return pd.read_csv(EVALUATION_DIR / "retrieval_eval_detail.csv")
+def load_cluster_summary(model_alias: str, text_source: str, method: str, artifact_namespace: str) -> dict:
+    from src.visualize.clustering import load_cluster_summary as _load_cluster_summary
+
+    return _load_cluster_summary(
+        model_alias,
+        text_source=text_source,
+        method=method,
+        artifact_namespace=artifact_namespace,
+    )
 
 
 @st.cache_data
-def load_eval_comparison() -> pd.DataFrame:
-    return pd.read_csv(EVALUATION_DIR / "retrieval_eval_source_comparison.csv")
+def load_eval_summary(artifact_namespace: str, eval_token: str) -> pd.DataFrame:
+    _ = eval_token
+    return pd.read_csv(evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace))
+
+
+@st.cache_data
+def load_eval_detail(artifact_namespace: str, eval_token: str) -> pd.DataFrame:
+    _ = eval_token
+    return pd.read_csv(evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace))
+
+
+@st.cache_data
+def load_eval_comparison(artifact_namespace: str, eval_token: str) -> pd.DataFrame:
+    _ = eval_token
+    return pd.read_csv(evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace))
 
 
 @st.cache_resource
-def get_keyword_engine(text_source: str) -> KeywordSearchEngine:
-    return KeywordSearchEngine(load_metadata(), text_source=text_source)
+def get_keyword_engine(
+    dataset_key: str,
+    source_types: tuple[str, ...],
+    text_source: str,
+    metadata_token: str,
+) -> KeywordSearchEngine:
+    _ = metadata_token
+    metadata, _ = load_search_metadata(dataset_key, source_types or None)
+    return KeywordSearchEngine(metadata, text_source=text_source)
 
 
 @st.cache_resource
-def get_dense_engine(model_alias: str, text_source: str) -> DenseSearchEngine:
-    engine = DenseSearchEngine(load_metadata(), model_alias, text_source=text_source)
+def get_dense_engine(
+    dataset_key: str,
+    source_types: tuple[str, ...],
+    model_alias: str,
+    text_source: str,
+    artifact_namespace: str,
+    metadata_token: str,
+) -> DenseSearchEngine:
+    _ = metadata_token
+    metadata, _ = load_search_metadata(dataset_key, source_types or None)
+    engine = DenseSearchEngine(
+        metadata,
+        model_alias,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+    )
     engine.load()
     return engine
 
@@ -105,10 +220,124 @@ def search_table(frame: pd.DataFrame) -> pd.DataFrame:
     return display
 
 
-def available_plot_mode_labels(model_aliases: list[str], text_source: str) -> list[str]:
+def ensure_artifacts(
+    metadata: pd.DataFrame,
+    artifact_namespace: str,
+    text_source: str,
+    model_aliases: list[str],
+    cluster_method: str,
+    n_clusters: int = 6,
+) -> None:
+    for text_source_item in [text_source]:
+        KeywordSearchEngine(metadata, text_source=text_source_item).export_index_metadata(
+            artifact_namespace=artifact_namespace
+        )
+        for model_alias in model_aliases:
+            dense_engine = DenseSearchEngine(
+                metadata,
+                model_alias,
+                text_source=text_source_item,
+                artifact_namespace=artifact_namespace,
+            )
+            dense_engine.load()
+
+            pca_path = projection_artifact_path(
+                model_alias,
+                text_source_item,
+                "pca",
+                3,
+                artifact_namespace=artifact_namespace,
+            )
+            tsne_2d_path = projection_artifact_path(
+                model_alias,
+                text_source_item,
+                "tsne",
+                2,
+                artifact_namespace=artifact_namespace,
+            )
+            tsne_3d_path = projection_artifact_path(
+                model_alias,
+                text_source_item,
+                "tsne",
+                3,
+                artifact_namespace=artifact_namespace,
+            )
+            projection_is_stale = (
+                not artifact_ids_match(pca_path, metadata)
+                or (tsne_2d_path.exists() and not artifact_ids_match(tsne_2d_path, metadata))
+                or (tsne_3d_path.exists() and not artifact_ids_match(tsne_3d_path, metadata))
+            )
+            if projection_is_stale:
+                build_projection_artifacts(
+                    metadata,
+                    model_alias,
+                    text_source=text_source_item,
+                    optional_methods=("tsne",),
+                    artifact_namespace=artifact_namespace,
+                )
+
+            cluster_csv_path = CLUSTERS_DIR / (
+                f"{artifact_stem(model_alias, text_source_item, artifact_namespace)}_{cluster_method}_clusters.csv"
+            )
+            if not artifact_ids_match(cluster_csv_path, metadata):
+                try:
+                    cluster_embeddings(
+                        metadata,
+                        model_alias,
+                        method=cluster_method,
+                        n_clusters=n_clusters,
+                        text_source=text_source_item,
+                        artifact_namespace=artifact_namespace,
+                    )
+                except Exception:
+                    if cluster_method != "kmeans":
+                        pass
+
+
+def evaluation_text_sources(metadata: pd.DataFrame) -> tuple[str, ...]:
+    sources: list[str] = []
+    if metadata["stt_transcript"].fillna("").astype(str).str.strip().str.len().gt(0).any():
+        sources.append("stt_transcript")
+    if metadata["original_transcript"].fillna("").astype(str).str.strip().str.len().gt(0).any():
+        sources.append("original_transcript")
+    return tuple(sources or ["stt_transcript"])
+
+
+def ensure_evaluation_artifacts(
+    metadata: pd.DataFrame,
+    queryset: pd.DataFrame,
+    artifact_namespace: str,
+) -> None:
+    required_paths = [
+        evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace),
+        evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace),
+        evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace),
+    ]
+    if all(path.exists() for path in required_paths):
+        return
+
+    evaluate_all(
+        metadata=metadata,
+        queryset=queryset,
+        text_sources=evaluation_text_sources(metadata),
+        include_optional=False,
+        artifact_namespace=artifact_namespace,
+    )
+
+
+def available_plot_mode_labels(model_aliases: list[str], text_source: str, artifact_namespace: str) -> list[str]:
     labels = []
     for label, (method, dimensions) in PLOT_MODE_OPTIONS.items():
-        if all(projection_artifact_path(model_alias, text_source, method, dimensions).exists() for model_alias in model_aliases):
+        if all(
+            projection_artifact_path(
+                model_alias,
+                text_source,
+                method,
+                dimensions,
+                artifact_namespace=artifact_namespace,
+            ).exists()
+            for model_alias in model_aliases
+        ):
             labels.append(label)
     return labels or ["PCA 3D"]
 
@@ -120,9 +349,16 @@ def build_plot_frame(
     dimensions: int,
     score_frame: pd.DataFrame,
     cluster_method: str,
+    artifact_namespace: str,
 ) -> pd.DataFrame:
-    projection = load_projection_frame(model_alias, text_source, method, dimensions)
-    cluster_frame = load_cluster_frame(model_alias, text_source, cluster_method)[["id", "cluster_id"]]
+    projection = load_projection_frame(
+        model_alias,
+        text_source,
+        method,
+        dimensions,
+        artifact_namespace=artifact_namespace,
+    )
+    cluster_frame = load_cluster_frame(model_alias, text_source, cluster_method, artifact_namespace)[["id", "cluster_id"]]
     merged = projection.merge(cluster_frame, on="id", how="left")
     merged = merged.merge(score_frame[["id", "raw_score", "normalized_score"]], on="id", how="left")
     merged["preview"] = merged["stt_transcript"].where(
@@ -144,14 +380,24 @@ def render_projection_panel(
     query: str,
     color_by: str,
     cluster_method: str,
+    artifact_namespace: str,
 ) -> None:
-    plot_frame = build_plot_frame(model_alias, text_source, method, dimensions, score_frame, cluster_method)
+    plot_frame = build_plot_frame(
+        model_alias,
+        text_source,
+        method,
+        dimensions,
+        score_frame,
+        cluster_method,
+        artifact_namespace,
+    )
     query_coords = project_query_vector(
         model_alias,
         text_source,
         method,
         dimensions,
         dense_engine.encode_query(query),
+        artifact_namespace=artifact_namespace,
     )
     fig = build_projection_figure(
         plot_frame,
@@ -165,11 +411,11 @@ def render_projection_panel(
     )
     st.plotly_chart(fig, use_container_width=True)
     if method == "tsne":
-        st.caption("t-SNE는 안정적인 query transform을 제공하지 않아 query 점 오버레이가 생략될 수 있습니다.")
+        st.caption("t-SNE는 query transform을 직접 지원하지 않아서 query 포인트는 표시되지 않을 수 있습니다.")
 
 
-def render_pca_metrics(model_alias: str, text_source: str) -> None:
-    variance = load_pca_variance(model_alias, text_source)
+def render_pca_metrics(model_alias: str, text_source: str, artifact_namespace: str) -> None:
+    variance = load_pca_variance(model_alias, text_source, artifact_namespace)
     ratios = variance["explained_variance_ratio"]
     metrics = st.columns(4)
     metrics[0].metric("PC1", f"{ratios[0]:.4f}")
@@ -198,14 +444,14 @@ def render_document_detail(metadata: pd.DataFrame, doc_id: str, text_source: str
     st.markdown(f"**문서 상세: {row['id']} / {row['title']}**")
     info = pd.DataFrame(
         [
+            {"field": "source_type", "value": row["source_type"]},
             {"field": "category", "value": row["category"]},
             {"field": "file_name", "value": row["file_name"]},
             {"field": "file_path", "value": row["file_path"]},
+            {"field": "audio_path", "value": row["audio_path"]},
             {"field": "processed_txt_path", "value": row["processed_txt_path"]},
-            {"field": "audio_file_path", "value": row["audio_file_path"]},
-            {"field": "stt_txt_path", "value": row["stt_txt_path"]},
             {"field": "keywords", "value": row["keywords"]},
-            {"field": "tts_provider", "value": row["tts_provider"]},
+            {"field": "processing_status", "value": row["processing_status"]},
             {"field": "stt_model_name", "value": row["stt_model_name"]},
         ]
     )
@@ -219,32 +465,45 @@ def render_document_detail(metadata: pd.DataFrame, doc_id: str, text_source: str
         st.markdown("**stt_transcript**")
         st.text_area("STT", value=row["stt_transcript"], height=260, key=f"stt_{doc_id}")
 
-    st.markdown(f"**{text_source} 기준 줄 단위 보기**")
+    st.markdown(f"**{text_source} 기준 라인 보기**")
     line_frame = pd.DataFrame(split_text_into_lines(resolve_primary_text(row, text_source=text_source)))
     if not line_frame.empty:
         st.dataframe(line_frame, use_container_width=True, height=260, hide_index=True)
 
-    audio_path = Path(row["audio_file_path"]) if row["audio_file_path"] else None
+    audio_path = Path(row["audio_path"]) if row["audio_path"] else None
     if audio_path and audio_path.exists():
         st.audio(str(audio_path))
 
 
 def main() -> None:
-    st.title("음성 → STT → 검색 비교 실험 앱")
-    st.caption("검색 결과와 함께 2D/3D 분포, 군집 구조, query 위치, top-k 문서 위치를 함께 해석할 수 있도록 확장한 UI다.")
+    st.title("음성/STT 검색 비교 실험 앱")
+    st.caption("기존 검색 비교, 문서 상세, 임베딩 투영, 클러스터, 평가 탭을 유지하면서 dummy / real youtube mp4 / combined 데이터셋을 전환할 수 있습니다.")
 
-    if not DEFAULT_METADATA_CSV.exists():
-        st.error("메타데이터가 없습니다. 먼저 `python run_audio_experiment_pipeline.py`를 실행하세요.")
-        st.stop()
-
-    metadata = load_metadata()
-    queryset = load_queries()
-    model_aliases = list(list_available_models(include_optional=False).keys())
+    dataset_options = available_dataset_options()
+    option_keys = [key for key, _ in dataset_options]
+    default_metadata = default_search_metadata_path()
+    default_dataset_key = next(
+        (key for key, path in dataset_options if path == default_metadata),
+        option_keys[0],
+    )
 
     with st.sidebar:
-        st.header("실험 설정")
-        selected_example = st.selectbox("예시 질의", options=queryset["query"].tolist(), index=0)
-        query = st.text_input("검색 질의", value=selected_example or "봄에 회의한 기획안")
+        st.header("앱 설정")
+        dataset_key = st.selectbox("데이터셋", options=option_keys, index=option_keys.index(default_dataset_key))
+        refresh_token = dataset_refresh_token(dataset_key)
+        all_metadata, metadata_path_str = load_metadata_for_app(dataset_key, tuple(), refresh_token)
+        source_type_options = sorted(all_metadata["source_type"].dropna().astype(str).unique().tolist())
+        selected_source_types = st.multiselect(
+            "source_type 필터",
+            options=source_type_options,
+            default=source_type_options,
+        )
+        source_type_tuple = tuple(selected_source_types)
+        metadata, metadata_path_str = load_metadata_for_app(dataset_key, source_type_tuple, refresh_token)
+        queryset = load_queries()
+        example_queries = queryset["query"].tolist() if not queryset.empty else ["interview transcript"]
+        selected_example = st.selectbox("예시 질의", options=example_queries, index=0)
+        query = st.text_input("검색 질의", value=selected_example)
         search_source = st.selectbox(
             "검색 기준 텍스트",
             options=["stt_transcript", "original_transcript", "combined"],
@@ -252,20 +511,51 @@ def main() -> None:
         )
         top_k = st.slider("Top-K", min_value=3, max_value=15, value=5)
         keyword_method = st.selectbox("키워드 방식", options=["bm25", "tfidf"], index=0)
+        model_aliases = list(list_available_models(include_optional=False).keys())
         model_a = st.selectbox("임베딩 모델 A", options=model_aliases, index=0)
         model_b = st.selectbox("임베딩 모델 B", options=model_aliases, index=min(1, len(model_aliases) - 1))
-        plot_mode_labels = available_plot_mode_labels([model_a, model_b], search_source)
+        artifact_namespace = dataset_artifact_namespace(Path(metadata_path_str), source_type_tuple or None)
+        cluster_method = st.selectbox("클러스터 방식", options=["kmeans", "hdbscan"], index=0)
+        with st.spinner("검색 및 시각화 아티팩트 확인 중..."):
+            ensure_artifacts(
+                metadata=metadata,
+                artifact_namespace=artifact_namespace,
+                text_source=search_source,
+                model_aliases=[model_a, model_b],
+                cluster_method=cluster_method,
+                n_clusters=6,
+            )
+        plot_mode_labels = available_plot_mode_labels([model_a, model_b], search_source, artifact_namespace)
         vector_plot_mode_label = st.selectbox("벡터 분포 모드", options=plot_mode_labels, index=0)
-        cluster_plot_mode_label = st.selectbox("군집화 모드", options=plot_mode_labels, index=0)
-        cluster_method = st.selectbox("군집 방식", options=["kmeans", "hdbscan"], index=0)
-        vector_color_by = st.selectbox("문서 분포 색상 기준", options=["category", "cluster_id"], index=0)
+        cluster_plot_mode_label = st.selectbox("클러스터 뷰 모드", options=plot_mode_labels, index=0)
+        vector_color_by = st.selectbox("문서 분포 색상 기준", options=["category", "cluster_id", "source_type"], index=0)
+
+    if metadata.empty:
+        st.warning("선택한 데이터셋/필터에 해당하는 문서가 없습니다.")
+        st.stop()
 
     vector_method, vector_dimensions = PLOT_MODE_OPTIONS[vector_plot_mode_label]
     cluster_view_method, cluster_view_dimensions = PLOT_MODE_OPTIONS[cluster_plot_mode_label]
 
-    keyword_engine = get_keyword_engine(search_source)
-    dense_engine_a = get_dense_engine(model_a, search_source)
-    dense_engine_b = get_dense_engine(model_b, search_source)
+    metadata_token = metadata_content_token(metadata, search_source)
+
+    keyword_engine = get_keyword_engine(dataset_key, source_type_tuple, search_source, metadata_token)
+    dense_engine_a = get_dense_engine(
+        dataset_key,
+        source_type_tuple,
+        model_a,
+        search_source,
+        artifact_namespace,
+        metadata_token,
+    )
+    dense_engine_b = get_dense_engine(
+        dataset_key,
+        source_type_tuple,
+        model_b,
+        search_source,
+        artifact_namespace,
+        metadata_token,
+    )
 
     keyword_results = keyword_engine.search(query, top_k=top_k, method=keyword_method)
     dense_results_a = dense_engine_a.search(query, top_k=top_k)
@@ -273,11 +563,12 @@ def main() -> None:
     dense_scores_a = dense_engine_a.score_all(query)
     dense_scores_b = dense_engine_b.score_all(query)
 
-    tabs = st.tabs(["검색 비교", "문서 비교", "벡터 분포", "군집화", "평가", "데이터셋"])
+    tabs = st.tabs(["검색 비교", "문서 비교", "벡터 분포", "클러스터", "평가", "데이터셋"])
     tab_search, tab_detail, tab_vectors, tab_clusters, tab_eval, tab_data = tabs
 
     with tab_search:
         st.subheader("검색 결과 비교")
+        st.caption(f"metadata: `{metadata_path_str}` / namespace: `{artifact_namespace}`")
         left, center, right = st.columns(3)
         with left:
             st.markdown(f"**키워드 검색 / {keyword_method.upper()} / {search_source}**")
@@ -290,7 +581,7 @@ def main() -> None:
             st.dataframe(search_table(dense_results_b), use_container_width=True, height=420)
 
     with tab_detail:
-        st.subheader("원문 vs STT 비교")
+        st.subheader("문서 상세")
         candidate_ids = pd.unique(
             pd.concat([keyword_results["id"], dense_results_a["id"], dense_results_b["id"]], ignore_index=True)
         ).tolist()
@@ -305,7 +596,7 @@ def main() -> None:
         ]:
             st.markdown(f"**{model_alias} / {search_source} / {vector_plot_mode_label}**")
             if vector_method == "pca":
-                render_pca_metrics(model_alias, search_source)
+                render_pca_metrics(model_alias, search_source, artifact_namespace)
             try:
                 render_projection_panel(
                     model_alias=model_alias,
@@ -318,25 +609,27 @@ def main() -> None:
                     query=query,
                     color_by=vector_color_by,
                     cluster_method=cluster_method,
+                    artifact_namespace=artifact_namespace,
                 )
             except Exception as exc:
                 st.warning(f"{model_alias} / {search_source} / {vector_plot_mode_label} 표시 실패: {exc}")
 
     with tab_clusters:
-        st.subheader("군집 구조")
+        st.subheader("클러스터 구조")
         for model_alias, engine, score_frame, results in [
             (model_a, dense_engine_a, dense_scores_a, dense_results_a),
             (model_b, dense_engine_b, dense_scores_b, dense_results_b),
         ]:
             st.markdown(f"**{model_alias} / {search_source} / {cluster_plot_mode_label} / {cluster_method}**")
             try:
-                summary = load_cluster_summary(model_alias, search_source, cluster_method)
+                summary = load_cluster_summary(model_alias, search_source, cluster_method, artifact_namespace)
                 metric_cols = st.columns(3)
-                metric_cols[0].metric("요청 군집 수", summary.get("n_clusters_requested", "-"))
-                metric_cols[1].metric("실제 군집 수", summary.get("n_clusters_found", "-"))
+                metric_cols[0].metric("요청 클러스터 수", summary.get("n_clusters_requested", "-"))
+                metric_cols[1].metric("실제 클러스터 수", summary.get("n_clusters_found", "-"))
+                silhouette_value = summary.get("silhouette_score")
                 metric_cols[2].metric(
                     "Silhouette",
-                    "-" if summary.get("silhouette_score") is None else f"{summary.get('silhouette_score'):.4f}",
+                    "-" if silhouette_value is None or pd.isna(silhouette_value) else f"{float(silhouette_value):.4f}",
                 )
                 render_projection_panel(
                     model_alias=model_alias,
@@ -349,10 +642,16 @@ def main() -> None:
                     query=query,
                     color_by="cluster_id",
                     cluster_method=cluster_method,
+                    artifact_namespace=artifact_namespace,
                 )
                 st.markdown("**대표 샘플**")
                 st.dataframe(
-                    load_representatives(model_alias, text_source=search_source, method=cluster_method),
+                    load_representatives(
+                        model_alias,
+                        text_source=search_source,
+                        method=cluster_method,
+                        artifact_namespace=artifact_namespace,
+                    ),
                     use_container_width=True,
                     height=220,
                 )
@@ -361,26 +660,37 @@ def main() -> None:
 
     with tab_eval:
         st.subheader("평가 결과")
+        with st.spinner("평가 아티팩트 확인 중..."):
+            ensure_evaluation_artifacts(metadata, queryset, artifact_namespace)
+        eval_token = evaluation_content_token(metadata, queryset)
         try:
-            st.markdown("**시스템별 요약**")
-            st.dataframe(load_eval_summary().round(4), use_container_width=True)
+            eval_summary = load_eval_summary(artifact_namespace, eval_token)
+            eval_comparison = load_eval_comparison(artifact_namespace, eval_token)
+            eval_detail = load_eval_detail(artifact_namespace, eval_token)
+            if eval_summary.empty:
+                st.info("현재 필터에 맞는 평가 질의가 없어 평가 결과가 비어 있습니다.")
+            st.markdown("**시스템 요약**")
+            st.dataframe(eval_summary.round(4), use_container_width=True)
             st.markdown("**원문 vs STT 비교**")
-            st.dataframe(load_eval_comparison().round(4), use_container_width=True)
+            st.dataframe(eval_comparison.round(4), use_container_width=True)
             st.markdown("**질의별 상세 결과**")
-            st.dataframe(load_eval_detail(), use_container_width=True, height=380)
+            st.dataframe(eval_detail, use_container_width=True, height=380)
         except Exception as exc:
-            st.warning(f"평가 결과를 불러오지 못했습니다: {exc}")
+            st.warning(f"현재 데이터셋 namespace `{artifact_namespace}`에 대한 평가 아티팩트가 없습니다: {exc}")
 
     with tab_data:
         st.subheader("데이터셋 미리보기")
         st.write(f"총 문서 수: {len(metadata)}")
+        st.write(f"metadata path: `{metadata_path_str}`")
+        st.write(f"artifact namespace: `{artifact_namespace}`")
         st.dataframe(metadata.head(20), use_container_width=True, height=360)
         category_counts = metadata["category"].value_counts().reset_index()
         category_counts.columns = ["category", "count"]
         fig = px.bar(category_counts, x="category", y="count", title="카테고리 분포")
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown("**평가용 질의셋**")
-        st.dataframe(queryset, use_container_width=True)
+        if not queryset.empty:
+            st.markdown("**평가용 질의**")
+            st.dataframe(queryset, use_container_width=True)
 
 
 if __name__ == "__main__":

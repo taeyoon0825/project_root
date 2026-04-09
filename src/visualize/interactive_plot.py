@@ -18,31 +18,62 @@ def projection_columns(method: str, dimensions: int) -> list[str]:
     return [f"{prefix}{i}" for i in range(1, dimensions + 1)]
 
 
-def projection_artifact_path(model_alias: str, text_source: str, method: str, dimensions: int) -> Path:
+def projection_artifact_path(
+    model_alias: str,
+    text_source: str,
+    method: str,
+    dimensions: int,
+    artifact_namespace: str | None = None,
+) -> Path:
     if method == "pca":
         dimensions = 3
-    return PLOTS_DIR / f"{artifact_stem(model_alias, text_source)}_{method}_{dimensions}d_projection.csv"
+    return PLOTS_DIR / f"{artifact_stem(model_alias, text_source, artifact_namespace)}_{method}_{dimensions}d_projection.csv"
 
 
-def reducer_artifact_path(model_alias: str, text_source: str, method: str, dimensions: int) -> Path:
+def reducer_artifact_path(
+    model_alias: str,
+    text_source: str,
+    method: str,
+    dimensions: int,
+    artifact_namespace: str | None = None,
+) -> Path:
     if method == "pca":
         dimensions = 3
-    return PLOTS_DIR / f"{artifact_stem(model_alias, text_source)}_{method}_{dimensions}d_model.joblib"
+    return PLOTS_DIR / f"{artifact_stem(model_alias, text_source, artifact_namespace)}_{method}_{dimensions}d_model.joblib"
 
 
-def load_projection_frame(model_alias: str, text_source: str, method: str, dimensions: int) -> pd.DataFrame:
-    return pd.read_csv(projection_artifact_path(model_alias, text_source, method, dimensions))
+def load_projection_frame(
+    model_alias: str,
+    text_source: str,
+    method: str,
+    dimensions: int,
+    artifact_namespace: str | None = None,
+) -> pd.DataFrame:
+    return pd.read_csv(projection_artifact_path(model_alias, text_source, method, dimensions, artifact_namespace))
 
 
-def load_reducer_if_available(model_alias: str, text_source: str, method: str, dimensions: int):
-    path = reducer_artifact_path(model_alias, text_source, method, dimensions)
+def load_reducer_if_available(
+    model_alias: str,
+    text_source: str,
+    method: str,
+    dimensions: int,
+    artifact_namespace: str | None = None,
+):
+    path = reducer_artifact_path(model_alias, text_source, method, dimensions, artifact_namespace)
     if not path.exists():
         return None
     return joblib.load(path)
 
 
-def project_query_vector(model_alias: str, text_source: str, method: str, dimensions: int, query_vector):
-    reducer = load_reducer_if_available(model_alias, text_source, method, dimensions)
+def project_query_vector(
+    model_alias: str,
+    text_source: str,
+    method: str,
+    dimensions: int,
+    query_vector,
+    artifact_namespace: str | None = None,
+):
+    reducer = load_reducer_if_available(model_alias, text_source, method, dimensions, artifact_namespace)
     if reducer is None:
         return None
     if method == "pca":
@@ -67,6 +98,7 @@ def build_projection_figure(
     plot_frame["color_group"] = plot_frame[color_by].astype(str)
     hover_columns = [
         "id",
+        "source_type",
         "category",
         "title",
         "file_name",

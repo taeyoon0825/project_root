@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -25,35 +26,84 @@ except ImportError:  # pragma: no cover
     faiss = None
 
 
-def artifact_stem(model_alias: str, text_source: str) -> str:
-    return f"{model_alias}__{text_source_suffix(text_source)}"
+def artifact_stem(model_alias: str, text_source: str, artifact_namespace: str | None = None) -> str:
+    base = f"{model_alias}__{text_source_suffix(text_source)}"
+    if not artifact_namespace:
+        return base
+    safe_namespace = re.sub(r"[^0-9A-Za-z._-]+", "_", artifact_namespace).strip("._")
+    return f"{safe_namespace}__{base}" if safe_namespace else base
 
 
 class DenseSearchEngine:
-    def __init__(self, metadata: pd.DataFrame, model_alias: str, text_source: str = DEFAULT_TEXT_SOURCE):
-        self.metadata = ensure_metadata_columns(metadata)
+    def __init__(
+        self,
+        metadata: pd.DataFrame,
+        model_alias: str,
+        text_source: str = DEFAULT_TEXT_SOURCE,
+        artifact_namespace: str | None = None,
+    ):
         self.model_alias = model_alias
         self.text_source = text_source
-        self._artifact_stem = artifact_stem(model_alias, text_source)
+        self.artifact_namespace = artifact_namespace
+        self._artifact_stem = artifact_stem(model_alias, text_source, artifact_namespace)
         self.embedding_path = EMBEDDINGS_DIR / f"{self._artifact_stem}_embeddings.npy"
         self.doc_meta_path = EMBEDDINGS_DIR / f"{self._artifact_stem}_metadata.csv"
         self.index_path = INDICES_DIR / f"{self._artifact_stem}.faiss"
         self.index_summary_path = INDICES_DIR / f"{self._artifact_stem}_index_summary.json"
         self.wrapper = EmbeddingModelWrapper(model_alias)
-        self.metadata["primary_text"] = self.metadata.apply(
-            lambda row: resolve_primary_text(row, text_source=self.text_source),
-            axis=1,
-        )
-        self.metadata["search_text"] = self.metadata.apply(
-            lambda row: build_search_text(row, text_source=self.text_source),
-            axis=1,
-        )
-        self.document_texts = self.metadata["search_text"].tolist()
+        self._set_metadata(metadata)
         self.embeddings: np.ndarray | None = None
         self.index = None
 
+    def _set_metadata(self, metadata: pd.DataFrame) -> None:
+        frame = ensure_metadata_columns(metadata).reset_index(drop=True)
+        frame["primary_text"] = frame.apply(
+            lambda row: resolve_primary_text(row, text_source=self.text_source),
+            axis=1,
+        )
+        frame["search_text"] = frame.apply(
+            lambda row: build_search_text(row, text_source=self.text_source),
+            axis=1,
+        )
+        self.metadata = frame
+        self.document_texts = self.metadata["search_text"].astype(str).tolist()
+
+    def _artifact_alignment_status(
+        self,
+        embeddings: np.ndarray,
+        stored_metadata: pd.DataFrame | None,
+    ) -> tuple[bool, str]:
+        current = self.metadata.reset_index(drop=True)
+        if len(embeddings) != len(current):
+            return False, f"embedding rows={len(embeddings)} / metadata rows={len(current)}"
+        if stored_metadata is None:
+            return False, "saved metadata file is missing"
+
+        stored = ensure_metadata_columns(stored_metadata).reset_index(drop=True)
+        if len(stored) != len(current):
+            return False, f"saved metadata rows={len(stored)} / current metadata rows={len(current)}"
+
+        current_ids = current["id"].astype(str).tolist()
+        stored_ids = stored["id"].astype(str).tolist()
+        if stored_ids != current_ids:
+            return False, "saved metadata ids do not match current metadata ids"
+
+        if "search_text" in stored.columns:
+            stored_search_text = stored["search_text"].fillna("").astype(str).tolist()
+        else:
+            stored_search_text = stored.apply(
+                lambda row: build_search_text(row, text_source=self.text_source),
+                axis=1,
+            ).astype(str).tolist()
+        current_search_text = current["search_text"].fillna("").astype(str).tolist()
+        if stored_search_text != current_search_text:
+            return False, "saved search text does not match current metadata search text"
+
+        return True, ""
+
     def build(self) -> None:
         ensure_project_dirs()
+        self._set_metadata(self.metadata)
         self.embeddings = self.wrapper.encode_documents(self.document_texts)
         save_numpy(self.embedding_path, self.embeddings)
         self.metadata.to_csv(self.doc_meta_path, index=False, encoding="utf-8-sig")
@@ -72,6 +122,7 @@ class DenseSearchEngine:
                 "model_alias": self.model_alias,
                 "model_name": self.wrapper.model_name,
                 "text_source": self.text_source,
+                "artifact_namespace": self.artifact_namespace,
                 "embedding_path": str(self.embedding_path.resolve()),
                 "metadata_path": str(self.doc_meta_path.resolve()),
                 "faiss_index_path": str(self.index_path.resolve()) if index_saved else None,
@@ -80,20 +131,49 @@ class DenseSearchEngine:
             },
         )
 
-    def load(self) -> None:
+    def load(self, rebuild_if_missing: bool = True, rebuild_if_mismatch: bool = True) -> None:
         if not self.embedding_path.exists():
+            if rebuild_if_missing:
+                self.build()
+                return
             raise FileNotFoundError(f"Embedding file not found: {self.embedding_path}")
-        self.embeddings = np.load(self.embedding_path)
+
+        embeddings = np.load(self.embedding_path)
+        stored_metadata = load_metadata_frame(self.doc_meta_path) if self.doc_meta_path.exists() else None
+        is_aligned, reason = self._artifact_alignment_status(embeddings, stored_metadata)
+        if not is_aligned:
+            if rebuild_if_mismatch:
+                print(f"[DenseSearchEngine] Rebuilding stale artifacts for {self._artifact_stem}: {reason}")
+                self.build()
+                return
+            raise ValueError(f"Embedding artifacts are stale for {self._artifact_stem}: {reason}")
+
+        self.embeddings = embeddings
         if faiss is not None and self.index_path.exists():
-            self.index = faiss.read_index(str(self.index_path))
+            index = faiss.read_index(str(self.index_path))
+            if getattr(index, "ntotal", 0) != int(self.embeddings.shape[0]):
+                if rebuild_if_mismatch:
+                    print(
+                        f"[DenseSearchEngine] Rebuilding stale FAISS index for {self._artifact_stem}: "
+                        f"ntotal={getattr(index, 'ntotal', 0)} / embeddings={self.embeddings.shape[0]}"
+                    )
+                    self.build()
+                    return
+                raise ValueError(f"FAISS index is stale for {self._artifact_stem}")
+            self.index = index
 
     def encode_query(self, query: str) -> np.ndarray:
         return self.wrapper.encode_queries([query])[0]
 
     def score_all(self, query: str) -> pd.DataFrame:
-        if self.embeddings is None:
+        if self.embeddings is None or len(self.metadata) != len(self.embeddings):
             self.load()
         assert self.embeddings is not None
+        if len(self.metadata) != len(self.embeddings):
+            raise ValueError(
+                f"Embedding rows ({len(self.embeddings)}) do not match metadata rows ({len(self.metadata)}) "
+                f"for namespace={self.artifact_namespace or 'default'}"
+            )
 
         query_embedding = self.encode_query(query)
         raw_scores = self.embeddings @ query_embedding
@@ -108,6 +188,7 @@ class DenseSearchEngine:
             lambda row: build_preview_text(row, text_source=self.text_source),
             axis=1,
         )
+        result_frame["transcript_preview"] = result_frame["preview"]
         result_frame["original_preview"] = result_frame["original_transcript"].str.slice(0, 140) + "..."
         result_frame["stt_preview"] = result_frame["stt_transcript"].str.slice(0, 140) + "..."
         return result_frame.sort_values("raw_score", ascending=False).reset_index(drop=True)
@@ -119,7 +200,7 @@ class DenseSearchEngine:
         )
         result_frame = pd.concat([result_frame, pd.DataFrame(match_details.tolist())], axis=1)
         result_frame["best_match_summary"] = result_frame.apply(
-            lambda row: f"{row['id']}의 {row['best_match_location']}" if row["best_match_location"] else str(row["id"]),
+            lambda row: f"{row['id']} / {row['best_match_location']}" if row["best_match_location"] else str(row["id"]),
             axis=1,
         )
         result_frame.insert(0, "rank", result_frame.index + 1)
@@ -127,8 +208,11 @@ class DenseSearchEngine:
             [
                 "rank",
                 "id",
+                "source_type",
                 "file_name",
+                "title",
                 "file_path",
+                "audio_path",
                 "processed_txt_path",
                 "audio_file_path",
                 "stt_txt_path",
@@ -141,6 +225,7 @@ class DenseSearchEngine:
                 "best_match_similarity",
                 "best_match_text",
                 "search_source",
+                "transcript_preview",
                 "preview",
                 "original_preview",
                 "stt_preview",
@@ -160,6 +245,7 @@ def build_all_indices(
     metadata_path: Path,
     include_optional: bool = False,
     text_sources: list[str] | tuple[str, ...] = (DEFAULT_TEXT_SOURCE,),
+    artifact_namespace: str | None = None,
 ) -> list[tuple[str, str]]:
     ensure_project_dirs()
     metadata = load_metadata_frame(metadata_path)
@@ -167,20 +253,30 @@ def build_all_indices(
     built: list[tuple[str, str]] = []
     for text_source in text_sources:
         for alias in model_aliases:
-            engine = DenseSearchEngine(metadata, alias, text_source=text_source)
+            engine = DenseSearchEngine(
+                metadata,
+                alias,
+                text_source=text_source,
+                artifact_namespace=artifact_namespace,
+            )
             engine.build()
             built.append((alias, text_source))
     return built
 
 
-def load_index_summary(model_alias: str, text_source: str = DEFAULT_TEXT_SOURCE) -> dict:
-    return load_json(INDICES_DIR / f"{artifact_stem(model_alias, text_source)}_index_summary.json")
+def load_index_summary(
+    model_alias: str,
+    text_source: str = DEFAULT_TEXT_SOURCE,
+    artifact_namespace: str | None = None,
+) -> dict:
+    return load_json(INDICES_DIR / f"{artifact_stem(model_alias, text_source, artifact_namespace)}_index_summary.json")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build dense embedding indices.")
     parser.add_argument("--metadata-path", type=Path, default=DEFAULT_METADATA_CSV)
     parser.add_argument("--include-optional", action="store_true")
+    parser.add_argument("--artifact-namespace", type=str, default=None)
     parser.add_argument(
         "--text-sources",
         nargs="+",
@@ -193,6 +289,7 @@ def main() -> None:
         args.metadata_path,
         include_optional=args.include_optional,
         text_sources=args.text_sources,
+        artifact_namespace=args.artifact_namespace,
     )
     print("Built embedding artifacts for:")
     for alias, text_source in built:

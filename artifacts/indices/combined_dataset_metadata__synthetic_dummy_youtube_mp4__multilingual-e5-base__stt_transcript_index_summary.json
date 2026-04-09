@@ -1,0 +1,11 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "model_name": "intfloat/multilingual-e5-base",
+  "text_source": "stt_transcript",
+  "artifact_namespace": "combined_dataset_metadata__synthetic_dummy_youtube_mp4",
+  "embedding_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\combined_dataset_metadata__synthetic_dummy_youtube_mp4__multilingual-e5-base__stt_transcript_embeddings.npy",
+  "metadata_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\combined_dataset_metadata__synthetic_dummy_youtube_mp4__multilingual-e5-base__stt_transcript_metadata.csv",
+  "faiss_index_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\indices\\combined_dataset_metadata__synthetic_dummy_youtube_mp4__multilingual-e5-base__stt_transcript.faiss",
+  "dimension": 768,
+  "document_count": 111
+}
