@@ -1,8 +1,0 @@
-{
-  "model_alias": "multilingual-e5-base",
-  "text_source": "stt_transcript",
-  "method": "kmeans",
-  "n_clusters_requested": 6,
-  "n_clusters_found": 6,
-  "silhouette_score": 0.2671523988246918
-}

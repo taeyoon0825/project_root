@@ -13,6 +13,7 @@ def transcribe_mp4_batch(
     language: str | None = "ko",
     overwrite: bool = False,
     skip_errors: bool = True,
+    target_ids: set[str] | None = None,
 ) -> Path:
     return transcribe_audio_batch(
         metadata_path=metadata_path,
@@ -21,6 +22,7 @@ def transcribe_mp4_batch(
         overwrite=overwrite,
         source_type="youtube_mp4",
         skip_errors=skip_errors,
+        target_ids=target_ids,
     )
 
 

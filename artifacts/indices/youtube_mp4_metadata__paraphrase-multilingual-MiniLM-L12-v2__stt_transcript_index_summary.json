@@ -7,5 +7,6 @@
   "metadata_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\embeddings\\youtube_mp4_metadata__paraphrase-multilingual-MiniLM-L12-v2__stt_transcript_metadata.csv",
   "faiss_index_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\indices\\youtube_mp4_metadata__paraphrase-multilingual-MiniLM-L12-v2__stt_transcript.faiss",
   "dimension": 384,
-  "document_count": 1
+  "document_count": 11,
+  "build_mode": "full_rebuild"
 }

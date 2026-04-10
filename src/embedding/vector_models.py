@@ -31,12 +31,16 @@ def normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
 
 
 class EmbeddingModelWrapper:
+    _MODEL_CACHE: dict[str, SentenceTransformer] = {}
+
     def __init__(self, model_alias: str):
         if model_alias not in MODEL_CATALOG:
             raise ValueError(f"Unknown model alias: {model_alias}")
         self.model_alias = model_alias
         self.model_name = MODEL_CATALOG[model_alias]
-        self.model = SentenceTransformer(self.model_name, cache_folder=str(HF_CACHE_DIR))
+        if self.model_name not in self._MODEL_CACHE:
+            self._MODEL_CACHE[self.model_name] = SentenceTransformer(self.model_name, cache_folder=str(HF_CACHE_DIR))
+        self.model = self._MODEL_CACHE[self.model_name]
 
     def _prepare_texts(self, texts: list[str], is_query: bool) -> list[str]:
         # E5 계열은 query/passsage 프롬프트 접두어가 중요하다.
@@ -50,7 +54,7 @@ class EmbeddingModelWrapper:
         embeddings = self.model.encode(
             prepared,
             batch_size=batch_size,
-            show_progress_bar=True,
+            show_progress_bar=False,
             convert_to_numpy=True,
             normalize_embeddings=False,
         )

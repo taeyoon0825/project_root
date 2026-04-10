@@ -27,6 +27,11 @@ METADATA_DEFAULTS = {
     "stt_model_name": "",
     "processing_status": "",
     "error_message": "",
+    "input_kind": "",
+    "source_mtime": "",
+    "source_size": "",
+    "source_hash": "",
+    "last_ingested_at": "",
 }
 
 

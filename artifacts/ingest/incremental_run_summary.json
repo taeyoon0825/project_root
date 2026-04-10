@@ -1,0 +1,31 @@
+{
+  "run_at": "2026-04-10T12:56:09+09:00",
+  "registry_path": "C:\\Users\\Administrator\\Desktop\\project_root\\artifacts\\ingest\\processed_registry.csv",
+  "artifact_namespace": "youtube_mp4_metadata",
+  "summary": {
+    "total_files": 11,
+    "new_files": 0,
+    "changed_files": 0,
+    "skipped_files": 11,
+    "missing_files": 0
+  },
+  "processed_files": [],
+  "skipped_files": [
+    "YTDown.com_YouTube_Media_3h1ZfLjF3RI_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_46X4gJcJ2mM_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_4UnJMcnKhM4_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_Cf-yc_dlKK0_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_fDEj1NGKL6g_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_g0YMyJhkobk_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_IS4sqz9v0vg_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_KIsduXcXDnE_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_n9utqJvZ5Ds_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_PbF7k5I8RJ4_001_1080p.mp4",
+    "YTDown.com_YouTube_Media_y4XAc2KPh4w_001_1080p.mp4"
+  ],
+  "new_files": [],
+  "changed_files": [],
+  "missing_files": [],
+  "indices_rebuilt": false,
+  "evaluation_ran": false
+}

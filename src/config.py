@@ -28,11 +28,14 @@ INDICES_DIR = ARTIFACTS_DIR / "indices"
 PLOTS_DIR = ARTIFACTS_DIR / "plots"
 CLUSTERS_DIR = ARTIFACTS_DIR / "clusters"
 EVALUATION_DIR = ARTIFACTS_DIR / "evaluation"
+INGEST_DIR = ARTIFACTS_DIR / "ingest"
 
 DEFAULT_METADATA_CSV = METADATA_DIR / "dataset_metadata.csv"
 REALDATA_METADATA_CSV = METADATA_DIR / "youtube_mp4_metadata.csv"
 COMBINED_METADATA_CSV = METADATA_DIR / "combined_dataset_metadata.csv"
 DEFAULT_QUERYSET_CSV = METADATA_DIR / "evaluation_queries.csv"
+PROCESSED_REGISTRY_CSV = INGEST_DIR / "processed_registry.csv"
+INCREMENTAL_RUN_SUMMARY_JSON = INGEST_DIR / "incremental_run_summary.json"
 
 EMBEDDING_MODELS = {
     "paraphrase-multilingual-MiniLM-L12-v2": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -67,5 +70,6 @@ def ensure_project_dirs() -> None:
         PLOTS_DIR,
         CLUSTERS_DIR,
         EVALUATION_DIR,
+        INGEST_DIR,
     ]:
         directory.mkdir(parents=True, exist_ok=True)

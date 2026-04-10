@@ -33,6 +33,19 @@ def _normalize_scores(scores) -> list[float]:
     return [(score - min_score) / (max_score - min_score) for score in scores]
 
 
+def _score_metadata(method: str) -> tuple[str, str]:
+    normalized_method = method.lower()
+    if normalized_method == "tfidf":
+        return (
+            "tfidf_dot",
+            "raw_score는 TF-IDF 문서 벡터와 질의 벡터의 내적 값이며, display_score는 현재 질의 기준 0~100 정규화 점수입니다.",
+        )
+    return (
+        "bm25",
+        "raw_score는 BM25 점수이며, display_score는 현재 질의 기준 0~100 정규화 점수입니다.",
+    )
+
+
 def _artifact_prefix(artifact_namespace: str | None) -> str:
     if not artifact_namespace:
         return ""
@@ -77,8 +90,12 @@ class KeywordSearchEngine:
         results = self.metadata.copy()
         results["raw_score"] = scores
         results["normalized_score"] = _normalize_scores(scores)
-        results["similarity_score"] = results["normalized_score"]
+        results["display_score"] = results["normalized_score"].astype(float) * 100.0
+        results["similarity_score"] = results["display_score"]
         results["search_source"] = self.text_source
+        score_kind, raw_score_explanation = _score_metadata(method)
+        results["score_kind"] = score_kind
+        results["raw_score_explanation"] = raw_score_explanation
         results["preview"] = results.apply(lambda row: build_preview_text(row, text_source=self.text_source), axis=1)
         results["transcript_preview"] = results["preview"]
         results["original_preview"] = results["original_transcript"].str.slice(0, 140) + "..."
@@ -106,7 +123,10 @@ class KeywordSearchEngine:
                 "category",
                 "raw_score",
                 "normalized_score",
+                "display_score",
                 "similarity_score",
+                "score_kind",
+                "raw_score_explanation",
                 "best_match_summary",
                 "best_match_location",
                 "best_match_similarity",

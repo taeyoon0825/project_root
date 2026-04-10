@@ -10,26 +10,37 @@ from src.data.metadata_schema import load_metadata_frame, save_metadata_frame
 
 def extract_audio_from_metadata(
     metadata_path: Path = REALDATA_METADATA_CSV,
-    source_type: str = "youtube_mp4",
+    source_type: str | None = "youtube_mp4",
     sample_rate: int = 16000,
     overwrite: bool = False,
     skip_errors: bool = True,
+    target_ids: set[str] | None = None,
 ) -> Path:
     ensure_project_dirs()
     metadata = load_metadata_frame(metadata_path)
-    total = len(metadata)
+    total_targets = (
+        metadata["id"].astype(str).isin(target_ids).sum()
+        if target_ids
+        else len(metadata)
+    )
+    current_index = 0
 
     for row_index, row in metadata.iterrows():
+        row_id = str(row.get("id", "")).strip()
         row_source_type = str(row.get("source_type", "")).strip()
-        if source_type and row_source_type != source_type:
+        if source_type and row_source_type != source_type and not (row_source_type == "youtube_wav" and source_type == "youtube_mp4"):
+            continue
+        if target_ids and row_id not in target_ids:
             continue
 
+        current_index += 1
         input_path = Path(str(row["file_path"]))
-        output_path = Path(str(row["audio_path"] or row["audio_file_path"]))
+        output_value = str(row["audio_path"] or row["audio_file_path"]).strip()
+        output_path = Path(output_value) if output_value else input_path.with_suffix(".wav")
 
-        print(f"[audio {row_index + 1}/{total}] {input_path.name}")
+        print(f"[audio {current_index}/{total_targets}] {input_path.name}")
         if not input_path.exists():
-            message = f"Input mp4 file does not exist: {input_path}"
+            message = f"Input media file does not exist: {input_path}"
             metadata.at[row_index, "processing_status"] = "audio_missing"
             metadata.at[row_index, "error_message"] = message
             if skip_errors:
@@ -38,7 +49,10 @@ def extract_audio_from_metadata(
             raise FileNotFoundError(message)
 
         try:
-            if overwrite or not output_path.exists():
+            if input_path.suffix.lower() == ".wav":
+                output_path = input_path
+                print(f"  - source wav reused {output_path}")
+            elif overwrite or not output_path.exists():
                 convert_media_to_wav(
                     input_path=input_path,
                     output_path=output_path,
@@ -89,3 +103,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

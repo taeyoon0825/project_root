@@ -1,0 +1,20 @@
+{
+  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
+  "text_source": "stt_transcript",
+  "artifact_namespace": "youtube_mp4_metadata__youtube_mp4",
+  "explained_variance_ratio": [
+    0.256011426448822,
+    0.2093905210494995,
+    0.13713893294334412
+  ],
+  "components_shape": [
+    3,
+    384
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.256011426448822,
+    "PC2": 0.2093905210494995,
+    "PC3": 0.13713893294334412
+  },
+  "cumulative_first3": 0.6025408506393433
+}

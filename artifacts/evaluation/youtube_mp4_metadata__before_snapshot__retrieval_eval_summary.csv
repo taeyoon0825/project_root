@@ -1,0 +1,1 @@
+﻿system_name,system_type,text_source,evaluation_definition,query_count,top_k,similarity_score,precision_at_k,recall_at_k,accuracy_at_1,f1_at_k,hallucination_rate,topk_hit_rate,top1_accuracy,top3_accuracy,silhouette_score

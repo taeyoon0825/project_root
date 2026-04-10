@@ -1,0 +1,5 @@
+﻿system_name,system_type,text_source,evaluation_definition,query_count,top_k,similarity_score,precision_at_k,recall_at_k,accuracy_at_1,f1_at_k,hallucination_rate,topk_hit_rate,top1_accuracy,top3_accuracy,silhouette_score
+keyword-bm25,keyword,stt_transcript,relevant_id/relevant_ids + category + source_type,11,3,1.0,0.33333333333333337,1.0,1.0,0.5,0.0,1.0,1.0,1.0,
+keyword-tfidf,keyword,stt_transcript,relevant_id/relevant_ids + category + source_type,11,3,1.0,0.33333333333333337,1.0,1.0,0.5,0.0,1.0,1.0,1.0,
+paraphrase-multilingual-MiniLM-L12-v2,dense,stt_transcript,relevant_id/relevant_ids + category + source_type,11,3,1.0,0.30303030303030304,0.9090909090909091,0.8181818181818182,0.45454545454545453,0.18181818181818182,0.9090909090909091,0.8181818181818182,0.9090909090909091,0.1698939949274063
+multilingual-e5-base,dense,stt_transcript,relevant_id/relevant_ids + category + source_type,11,3,1.0,0.33333333333333337,1.0,0.8181818181818182,0.5,0.18181818181818182,1.0,0.8181818181818182,1.0,0.10188741236925125

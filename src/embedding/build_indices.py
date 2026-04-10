@@ -101,9 +101,62 @@ class DenseSearchEngine:
 
         return True, ""
 
-    def build(self) -> None:
-        ensure_project_dirs()
-        self._set_metadata(self.metadata)
+    def _load_stored_metadata(self) -> pd.DataFrame | None:
+        if not self.doc_meta_path.exists():
+            return None
+        return load_metadata_frame(self.doc_meta_path)
+
+    def _search_texts_for_frame(self, frame: pd.DataFrame) -> list[str]:
+        normalized = ensure_metadata_columns(frame).reset_index(drop=True)
+        if "search_text" in normalized.columns:
+            return normalized["search_text"].fillna("").astype(str).tolist()
+        return normalized.apply(
+            lambda row: build_search_text(row, text_source=self.text_source),
+            axis=1,
+        ).astype(str).tolist()
+
+    def _append_candidates(self, stored_metadata: pd.DataFrame) -> pd.DataFrame | None:
+        stored = ensure_metadata_columns(stored_metadata).reset_index(drop=True)
+        current = self.metadata.reset_index(drop=True)
+        if len(current) < len(stored):
+            return None
+
+        stored_ids = stored["id"].astype(str).tolist()
+        current_ids = current["id"].astype(str).tolist()
+        if current_ids[: len(stored_ids)] != stored_ids:
+            return None
+
+        stored_search_texts = self._search_texts_for_frame(stored)
+        current_prefix_search_texts = current.iloc[: len(stored)].apply(
+            lambda row: build_search_text(row, text_source=self.text_source),
+            axis=1,
+        ).astype(str).tolist()
+        if current_prefix_search_texts != stored_search_texts:
+            return None
+
+        appended = current.iloc[len(stored) :].copy().reset_index(drop=True)
+        if appended.empty:
+            return appended
+        return appended
+
+    def _save_index_summary(self, document_count: int, index_saved: bool, build_mode: str) -> None:
+        save_json(
+            self.index_summary_path,
+            {
+                "model_alias": self.model_alias,
+                "model_name": self.wrapper.model_name,
+                "text_source": self.text_source,
+                "artifact_namespace": self.artifact_namespace,
+                "embedding_path": str(self.embedding_path.resolve()),
+                "metadata_path": str(self.doc_meta_path.resolve()),
+                "faiss_index_path": str(self.index_path.resolve()) if index_saved else None,
+                "dimension": int(self.embeddings.shape[1]) if self.embeddings is not None else None,
+                "document_count": int(document_count),
+                "build_mode": build_mode,
+            },
+        )
+
+    def _write_full_artifacts(self, build_mode: str = "full_rebuild") -> None:
         self.embeddings = self.wrapper.encode_documents(self.document_texts)
         save_numpy(self.embedding_path, self.embeddings)
         self.metadata.to_csv(self.doc_meta_path, index=False, encoding="utf-8-sig")
@@ -115,21 +168,66 @@ class DenseSearchEngine:
             faiss.write_index(index, str(self.index_path))
             self.index = index
             index_saved = True
+        self._save_index_summary(document_count=len(self.metadata), index_saved=index_saved, build_mode=build_mode)
 
-        save_json(
-            self.index_summary_path,
-            {
-                "model_alias": self.model_alias,
-                "model_name": self.wrapper.model_name,
-                "text_source": self.text_source,
-                "artifact_namespace": self.artifact_namespace,
-                "embedding_path": str(self.embedding_path.resolve()),
-                "metadata_path": str(self.doc_meta_path.resolve()),
-                "faiss_index_path": str(self.index_path.resolve()) if index_saved else None,
-                "dimension": int(self.embeddings.shape[1]),
-                "document_count": int(self.embeddings.shape[0]),
-            },
+    def _append_artifacts(
+        self,
+        stored_embeddings: np.ndarray,
+        stored_metadata: pd.DataFrame,
+        appended_metadata: pd.DataFrame,
+    ) -> None:
+        appended_texts = appended_metadata["search_text"].fillna("").astype(str).tolist()
+        appended_embeddings = self.wrapper.encode_documents(appended_texts)
+        self.embeddings = np.vstack([stored_embeddings, appended_embeddings]).astype(np.float32)
+        save_numpy(self.embedding_path, self.embeddings)
+
+        combined_metadata = pd.concat([stored_metadata, appended_metadata], ignore_index=True)
+        combined_metadata.to_csv(self.doc_meta_path, index=False, encoding="utf-8-sig")
+        self.metadata = combined_metadata.reset_index(drop=True)
+        self.document_texts = self.metadata["search_text"].fillna("").astype(str).tolist()
+
+        index_saved = False
+        if faiss is not None:
+            if self.index_path.exists():
+                index = faiss.read_index(str(self.index_path))
+                if getattr(index, "ntotal", 0) == int(len(stored_embeddings)):
+                    index.add(appended_embeddings)
+                else:
+                    index = faiss.IndexFlatIP(self.embeddings.shape[1])
+                    index.add(self.embeddings)
+            else:
+                index = faiss.IndexFlatIP(self.embeddings.shape[1])
+                index.add(self.embeddings)
+            faiss.write_index(index, str(self.index_path))
+            self.index = index
+            index_saved = True
+        self._save_index_summary(
+            document_count=len(self.metadata),
+            index_saved=index_saved,
+            build_mode=f"incremental_append:{len(appended_metadata)}",
         )
+
+    def build(self, incremental: bool = True) -> None:
+        ensure_project_dirs()
+        self._set_metadata(self.metadata)
+        if incremental and self.embedding_path.exists() and self.doc_meta_path.exists():
+            stored_embeddings = np.load(self.embedding_path)
+            stored_metadata = self._load_stored_metadata()
+            if stored_metadata is not None:
+                is_aligned, _ = self._artifact_alignment_status(stored_embeddings, stored_metadata)
+                if is_aligned:
+                    self.embeddings = stored_embeddings
+                    if faiss is not None and self.index_path.exists():
+                        self.index = faiss.read_index(str(self.index_path))
+                    self._save_index_summary(document_count=len(self.metadata), index_saved=self.index is not None, build_mode="no_update")
+                    return
+
+                appended_metadata = self._append_candidates(stored_metadata)
+                if appended_metadata is not None and not appended_metadata.empty:
+                    self._append_artifacts(stored_embeddings, ensure_metadata_columns(stored_metadata), appended_metadata)
+                    return
+
+        self._write_full_artifacts(build_mode="full_rebuild")
 
     def load(self, rebuild_if_missing: bool = True, rebuild_if_mismatch: bool = True) -> None:
         if not self.embedding_path.exists():
@@ -177,13 +275,19 @@ class DenseSearchEngine:
 
         query_embedding = self.encode_query(query)
         raw_scores = self.embeddings @ query_embedding
-        normalized_scores = _normalize_scores(raw_scores)
+        normalized_scores = np.clip((raw_scores + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
 
         result_frame = self.metadata.copy()
         result_frame["raw_score"] = raw_scores
         result_frame["normalized_score"] = normalized_scores
-        result_frame["similarity_score"] = normalized_scores
+        result_frame["display_score"] = normalized_scores * 100.0
+        result_frame["similarity_score"] = result_frame["display_score"]
         result_frame["search_source"] = self.text_source
+        result_frame["score_kind"] = "cosine_similarity"
+        result_frame["raw_score_explanation"] = (
+            "raw_score는 L2 정규화된 임베딩 간 내적이며 cosine similarity와 동일합니다. "
+            "display_score는 cosine similarity를 0~100 범위로 선형 변환한 값입니다."
+        )
         result_frame["preview"] = result_frame.apply(
             lambda row: build_preview_text(row, text_source=self.text_source),
             axis=1,
@@ -219,7 +323,10 @@ class DenseSearchEngine:
                 "category",
                 "raw_score",
                 "normalized_score",
+                "display_score",
                 "similarity_score",
+                "score_kind",
+                "raw_score_explanation",
                 "best_match_summary",
                 "best_match_location",
                 "best_match_similarity",
@@ -246,6 +353,7 @@ def build_all_indices(
     include_optional: bool = False,
     text_sources: list[str] | tuple[str, ...] = (DEFAULT_TEXT_SOURCE,),
     artifact_namespace: str | None = None,
+    incremental: bool = True,
 ) -> list[tuple[str, str]]:
     ensure_project_dirs()
     metadata = load_metadata_frame(metadata_path)
@@ -259,7 +367,7 @@ def build_all_indices(
                 text_source=text_source,
                 artifact_namespace=artifact_namespace,
             )
-            engine.build()
+            engine.build(incremental=incremental)
             built.append((alias, text_source))
     return built
 

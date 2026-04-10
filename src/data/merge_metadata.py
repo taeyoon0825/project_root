@@ -27,6 +27,11 @@ def merge_metadata_files(
         merged = pd.concat(frames, ignore_index=True)
         merged = merged.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
 
+    if output_path.exists():
+        existing = load_metadata_frame(output_path)
+        if existing.reset_index(drop=True).equals(merged.reset_index(drop=True)):
+            return merged
+
     save_metadata_frame(merged, output_path)
     return merged
 

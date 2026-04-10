@@ -1,7 +1,0 @@
-{
-  "model_alias": "paraphrase-multilingual-MiniLM-L12-v2",
-  "method": "kmeans",
-  "n_clusters_requested": 6,
-  "n_clusters_found": 6,
-  "silhouette_score": 0.37686046957969666
-}

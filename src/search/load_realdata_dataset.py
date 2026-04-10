@@ -6,23 +6,24 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import COMBINED_METADATA_CSV, DEFAULT_METADATA_CSV, REALDATA_METADATA_CSV
-from src.data.metadata_schema import load_metadata_frame
+from src.data.metadata_schema import empty_metadata_frame, load_metadata_frame
 
 
 DATASET_PATHS = {
-    "dummy": DEFAULT_METADATA_CSV,
     "youtube_mp4": REALDATA_METADATA_CSV,
     "combined": COMBINED_METADATA_CSV,
+    "dummy": DEFAULT_METADATA_CSV,
 }
 
 
 def available_dataset_options() -> list[tuple[str, Path]]:
     options: list[tuple[str, Path]] = []
-    for key, path in DATASET_PATHS.items():
+    for key in ["youtube_mp4", "combined", "dummy"]:
+        path = DATASET_PATHS[key]
         if path.exists():
             options.append((key, path))
     if not options:
-        options.append(("dummy", DEFAULT_METADATA_CSV))
+        options.append(("youtube_mp4", REALDATA_METADATA_CSV))
     return options
 
 
@@ -35,10 +36,10 @@ def resolve_dataset_path(dataset_key_or_path: str | Path) -> Path:
 
 
 def default_search_metadata_path() -> Path:
-    if COMBINED_METADATA_CSV.exists():
-        return COMBINED_METADATA_CSV
     if REALDATA_METADATA_CSV.exists():
         return REALDATA_METADATA_CSV
+    if COMBINED_METADATA_CSV.exists():
+        return COMBINED_METADATA_CSV
     return DEFAULT_METADATA_CSV
 
 
@@ -58,7 +59,7 @@ def load_search_metadata(
     source_types: tuple[str, ...] | None = None,
 ) -> tuple[pd.DataFrame, Path]:
     metadata_path = resolve_dataset_path(dataset_key_or_path)
-    frame = load_metadata_frame(metadata_path)
+    frame = load_metadata_frame(metadata_path) if metadata_path.exists() else empty_metadata_frame()
     if source_types:
         frame = frame.loc[frame["source_type"].isin(source_types)].reset_index(drop=True)
     return frame, metadata_path

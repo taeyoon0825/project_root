@@ -1,0 +1,5 @@
+﻿system_name,system_type,accuracy_at_1__stt_transcript,f1_at_k__stt_transcript,recall_at_k__stt_transcript,top1_accuracy__stt_transcript,top3_accuracy__stt_transcript
+keyword-bm25,keyword,1.0,0.5,1.0,1.0,1.0
+keyword-tfidf,keyword,1.0,0.5,1.0,1.0,1.0
+multilingual-e5-base,dense,0.8181818181818182,0.5,1.0,0.8181818181818182,1.0
+paraphrase-multilingual-MiniLM-L12-v2,dense,0.8181818181818182,0.45454545454545453,0.9090909090909091,0.8181818181818182,0.9090909090909091
