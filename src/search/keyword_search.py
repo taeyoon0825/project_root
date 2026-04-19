@@ -11,6 +11,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src.config import DEFAULT_METADATA_CSV, INDICES_DIR, ensure_project_dirs
 from src.data.metadata_schema import ensure_metadata_columns, load_metadata_frame
+from src.search.explainability import RANKER_SCORE_WEIGHT, explain_frame
 from src.search.match_locator import locate_best_keyword_match, simple_tokenize
 from src.search.text_source import (
     DEFAULT_TEXT_SOURCE,
@@ -29,7 +30,7 @@ def _normalize_scores(scores) -> list[float]:
     min_score = min(scores)
     max_score = max(scores)
     if math.isclose(min_score, max_score):
-        return [1.0 for _ in scores]
+        return [1.0 if max_score > 0 else 0.0 for _ in scores]
     return [(score - min_score) / (max_score - min_score) for score in scores]
 
 
@@ -81,26 +82,42 @@ class KeywordSearchEngine:
 
     def search(self, query: str, top_k: int = 10, method: str = "bm25") -> pd.DataFrame:
         query_tokens = simple_tokenize(query)
-        if method.lower() == "tfidf":
+        normalized_method = method.lower()
+        if normalized_method == "tfidf":
             query_vector = self.tfidf.transform([query])
             scores = (self.tfidf_matrix @ query_vector.T).toarray().ravel()
         else:
             scores = self.bm25.get_scores(query_tokens)
 
         results = self.metadata.copy()
-        results["raw_score"] = scores
-        results["normalized_score"] = _normalize_scores(scores)
-        results["display_score"] = results["normalized_score"].astype(float) * 100.0
-        results["similarity_score"] = results["display_score"]
+        ranker_normalized_scores = _normalize_scores(scores)
         results["search_source"] = self.text_source
         score_kind, raw_score_explanation = _score_metadata(method)
+        results = explain_frame(
+            results,
+            query,
+            text_source=self.text_source,
+            ranker_scores=[score * RANKER_SCORE_WEIGHT for score in ranker_normalized_scores],
+            score_kind=score_kind,
+        )
+        results["ranker_raw_score"] = scores
+        results["ranker_normalized_score"] = ranker_normalized_scores
+        results["raw_score"] = results["final_score"].astype(float)
+        results["normalized_score"] = _normalize_scores(results["final_score"])
+        results["display_score"] = results["normalized_score"].astype(float) * 100.0
+        results["similarity_score"] = results["display_score"]
         results["score_kind"] = score_kind
-        results["raw_score_explanation"] = raw_score_explanation
+        results["raw_score_explanation"] = (
+            f"final_score = lexical_score + semantic_score. "
+            f"lexical_score = title*5 + tags*4 + description*3 + transcript*2 + "
+            f"{score_kind} normalized score*{RANKER_SCORE_WEIGHT:.1f}. "
+            f"{raw_score_explanation}"
+        )
         results["preview"] = results.apply(lambda row: build_preview_text(row, text_source=self.text_source), axis=1)
         results["transcript_preview"] = results["preview"]
         results["original_preview"] = results["original_transcript"].str.slice(0, 140) + "..."
         results["stt_preview"] = results["stt_transcript"].str.slice(0, 140) + "..."
-        results = results.sort_values("raw_score", ascending=False).head(top_k).reset_index(drop=True)
+        results = results.sort_values("final_score", ascending=False).head(top_k).reset_index(drop=True)
         match_details = results["primary_text"].apply(lambda text: locate_best_keyword_match(text, query, method=method))
         results = pd.concat([results, pd.DataFrame(match_details.tolist())], axis=1)
         results["best_match_summary"] = results.apply(
@@ -122,9 +139,22 @@ class KeywordSearchEngine:
                 "stt_txt_path",
                 "category",
                 "raw_score",
+                "ranker_raw_score",
+                "ranker_normalized_score",
                 "normalized_score",
                 "display_score",
                 "similarity_score",
+                "matched_tokens",
+                "title_match_count",
+                "description_match_count",
+                "tags_match_count",
+                "transcript_match_count",
+                "field_weight_score",
+                "ranker_score",
+                "lexical_score",
+                "semantic_score",
+                "final_score",
+                "reason",
                 "score_kind",
                 "raw_score_explanation",
                 "best_match_summary",

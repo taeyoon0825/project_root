@@ -12,12 +12,14 @@ METADATA_DEFAULTS = {
     "source_type": "synthetic_dummy",
     "category": "",
     "title": "",
+    "description": "",
     "file_name": "",
     "file_path": "",
     "audio_path": "",
     "processed_txt_path": "",
     "original_transcript": "",
     "stt_transcript": "",
+    "tags": "",
     "keywords": "",
     "tts_text": "",
     "audio_file_name": "",
@@ -65,6 +67,8 @@ def _sync_alias_columns(frame: pd.DataFrame) -> None:
         frame["title"].str.len() > 0,
         frame["file_name"].apply(lambda value: Path(value).stem if str(value).strip() else ""),
     )
+    frame["tags"] = frame["tags"].where(frame["tags"].str.len() > 0, frame["keywords"])
+    frame["keywords"] = frame["keywords"].where(frame["keywords"].str.len() > 0, frame["tags"])
 
 
 def ensure_metadata_columns(frame: pd.DataFrame) -> pd.DataFrame:

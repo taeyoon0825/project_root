@@ -57,6 +57,9 @@ def format_query_console_report(detail_row: pd.Series, top_k: int) -> list[str]:
         f"[EVAL] Recall@{top_k}: {float(detail_row.get('recall_at_k', 0.0)):.4f}",
         f"[EVAL] Accuracy@1: {float(detail_row.get('accuracy_at_1', 0.0)):.4f}",
         f"[EVAL] F1@{top_k}: {float(detail_row.get('f1_at_k', 0.0)):.4f}",
+        f"[EVAL] Soft Precision@{top_k}: {float(detail_row.get('soft_precision_at_k', 0.0)):.4f}",
+        f"[EVAL] Soft Accuracy@1: {float(detail_row.get('soft_accuracy_at_1', 0.0)):.4f}",
+        f"[EVAL] Soft Score Reason: {detail_row.get('soft_score_reason', '')}",
         f"[EVAL] File Match Top-1: {detail_row.get('top1_file_match', 'NO')}",
         f"[EVAL] Segment Match Top-1: {detail_row.get('top1_segment_match', 'not_scored')}",
         f"[EVAL] Hallucination: {detail_row.get('hallucination', 'NO')}",
@@ -79,6 +82,9 @@ def format_summary_console_report(summary: pd.DataFrame, top_k: int) -> list[str
                 f"[EVAL] Macro Recall@{top_k}: {float(row.recall_at_k):.4f}",
                 f"[EVAL] Accuracy@1: {float(row.accuracy_at_1):.4f}",
                 f"[EVAL] Macro F1@{top_k}: {float(row.f1_at_k):.4f}",
+                f"[EVAL] Soft Precision@{top_k}: {float(getattr(row, 'soft_precision_at_k', 0.0)):.4f}",
+                f"[EVAL] Soft Accuracy@1: {float(getattr(row, 'soft_accuracy_at_1', 0.0)):.4f}",
+                f"[EVAL] Soft F1@{top_k}: {float(getattr(row, 'soft_f1_at_k', 0.0)):.4f}",
                 f"[EVAL] Micro Precision@{top_k}: {float(getattr(row, 'micro_precision_at_k', 0.0)):.4f}",
                 f"[EVAL] Micro Recall@{top_k}: {float(getattr(row, 'micro_recall_at_k', 0.0)):.4f}",
                 f"[EVAL] Micro F1@{top_k}: {float(getattr(row, 'micro_f1_at_k', 0.0)):.4f}",
@@ -98,11 +104,19 @@ def compare_summary_frames(before: pd.DataFrame, after: pd.DataFrame) -> pd.Data
         "recall_at_k",
         "accuracy_at_1",
         "f1_at_k",
+        "soft_precision_at_k",
+        "soft_recall_at_k",
+        "soft_accuracy_at_1",
+        "soft_f1_at_k",
         "hallucination_rate",
         "micro_precision_at_k",
         "micro_recall_at_k",
         "micro_f1_at_k",
     ]
+    for frame in (before, after):
+        for column in metric_columns:
+            if column not in frame.columns:
+                frame[column] = 0.0
     before_frame = before[join_columns + metric_columns].copy()
     before_frame = before_frame.rename(columns={column: f"{column}_before" for column in metric_columns})
     after_frame = after[join_columns + metric_columns].copy()

@@ -1,0 +1,9 @@
+{
+  "token": "d531eba6eae4acf2acdc23955204cadfc3982a4e",
+  "top_k": 5,
+  "text_sources": [
+    "stt_transcript"
+  ],
+  "query_count": 17,
+  "summary_rows": 4
+}

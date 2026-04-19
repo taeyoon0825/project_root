@@ -74,6 +74,11 @@ data/audio/
 *.mp3
 *.m4a
 *.flac
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
 
 # Final allow-list for Streamlit deployment assets
 !data/metadata/

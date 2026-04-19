@@ -25,6 +25,8 @@
     "stt_model_name",
     "processing_status",
     "error_message",
+    "description",
+    "tags",
     "input_kind",
     "source_mtime",
     "source_size",

@@ -1,5 +1,5 @@
-﻿system_name,system_type,accuracy_at_1__stt_transcript,f1_at_k__stt_transcript,recall_at_k__stt_transcript,top1_accuracy__stt_transcript,top3_accuracy__stt_transcript
-keyword-bm25,keyword,1.0,0.5,1.0,1.0,1.0
-keyword-tfidf,keyword,1.0,0.5,1.0,1.0,1.0
-multilingual-e5-base,dense,0.8181818181818182,0.5,1.0,0.8181818181818182,1.0
-paraphrase-multilingual-MiniLM-L12-v2,dense,0.8181818181818182,0.45454545454545453,0.9090909090909091,0.8181818181818182,0.9090909090909091
+﻿system_name,system_type,accuracy_at_1__stt_transcript,f1_at_k__stt_transcript,hallucination_rate__stt_transcript,micro_f1_at_k__stt_transcript,micro_precision_at_k__stt_transcript,micro_recall_at_k__stt_transcript,precision_at_k__stt_transcript,recall_at_k__stt_transcript,soft_accuracy_at_1__stt_transcript,soft_f1_at_k__stt_transcript,soft_precision_at_k__stt_transcript,soft_recall_at_k__stt_transcript
+keyword-bm25,keyword,1.0,0.3333333333333334,0.0,0.33333333333333337,0.2,1.0,0.2,1.0,0.977206487956488,0.38649471380058514,0.23955007377200932,1.0
+keyword-tfidf,keyword,1.0,0.3333333333333334,0.0,0.33333333333333337,0.2,1.0,0.2,1.0,0.977206487956488,0.38679851810430566,0.23978411918376671,1.0
+multilingual-e5-base,dense,1.0,0.3333333333333334,0.0,0.33333333333333337,0.2,1.0,0.2,1.0,0.977206487956488,0.3868365070420454,0.2398128964544079,1.0
+paraphrase-multilingual-MiniLM-L12-v2,dense,1.0,0.3333333333333334,0.0,0.33333333333333337,0.2,1.0,0.2,1.0,0.977206487956488,0.38678708820355484,0.23977415240896605,1.0

@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from src.evaluation.ground_truth import _split_int_values, _split_values
+from src.evaluation.soft_metrics import summarize_soft_ranked_results
 
 
 def _normalize_text(value: Any) -> str:
@@ -77,10 +78,17 @@ def evaluate_ranked_results(
     recall = tp / max(1, len(relevant_ids))
     accuracy = float(bool(predicted_ids and predicted_ids[0] in relevant_ids))
     f1 = 0.0 if precision + recall == 0 else (2 * precision * recall) / (precision + recall)
+    soft_metrics = summarize_soft_ranked_results(
+        topk,
+        query_row.get("query", ""),
+        relevant_ids,
+        top_k=top_k,
+    )
 
     top1_row = topk.iloc[0] if not topk.empty else pd.Series(dtype=object)
     top1_display_score = _display_score(top1_row) if not topk.empty else 0.0
     top1_raw_score = _raw_score(top1_row) if not topk.empty else 0.0
+    top1_final_score = float(top1_row.get("final_score", top1_raw_score) or 0.0) if not topk.empty else 0.0
 
     top1_segment_match, top1_segment_reason = _segment_match(top1_row, ground_truth) if not topk.empty else ("none", "")
     topk_segment_matches = []
@@ -97,6 +105,7 @@ def evaluate_ranked_results(
         "recall_at_k": recall,
         "accuracy_at_1": accuracy,
         "f1_at_k": f1,
+        **soft_metrics,
         "topk_hit_rate": float(tp > 0),
         "top1_id": str(top1_row.get("id", "")) if not topk.empty else "",
         "top1_file_name": str(top1_row.get("file_name", "")) if not topk.empty else "",
@@ -104,13 +113,25 @@ def evaluate_ranked_results(
         "top1_source_type": str(top1_row.get("source_type", "")) if not topk.empty else "",
         "top1_raw_score": top1_raw_score,
         "top1_display_score": top1_display_score,
+        "top1_final_score": top1_final_score,
+        "top1_matched_tokens": str(top1_row.get("matched_tokens", "")) if not topk.empty else "",
+        "top1_title_match_count": int(top1_row.get("title_match_count", 0) or 0) if not topk.empty else 0,
+        "top1_description_match_count": int(top1_row.get("description_match_count", 0) or 0) if not topk.empty else 0,
+        "top1_tags_match_count": int(top1_row.get("tags_match_count", 0) or 0) if not topk.empty else 0,
+        "top1_transcript_match_count": int(top1_row.get("transcript_match_count", 0) or 0) if not topk.empty else 0,
+        "top1_lexical_score": float(top1_row.get("lexical_score", 0.0) or 0.0) if not topk.empty else 0.0,
+        "top1_semantic_score": float(top1_row.get("semantic_score", 0.0) or 0.0) if not topk.empty else 0.0,
+        "top1_reason": str(top1_row.get("reason", "")) if not topk.empty else "",
         "mean_topk_raw_score": float(topk["raw_score"].astype(float).mean()) if "raw_score" in topk.columns and not topk.empty else 0.0,
+        "mean_topk_final_score": float(topk["final_score"].astype(float).mean()) if "final_score" in topk.columns and not topk.empty else 0.0,
         "mean_topk_display_score": float(topk["display_score"].astype(float).mean()) if "display_score" in topk.columns and not topk.empty else float(topk["similarity_score"].astype(float).mean()) if "similarity_score" in topk.columns and not topk.empty else 0.0,
         "topk_ids": ", ".join(predicted_ids),
         "topk_file_names": ", ".join(predicted_file_names),
         "topk_categories": ", ".join(predicted_categories),
         "topk_raw_scores": ", ".join(f"{float(score):.4f}" for score in topk["raw_score"].tolist()) if "raw_score" in topk.columns else "",
+        "topk_final_scores": ", ".join(f"{float(score):.4f}" for score in topk["final_score"].tolist()) if "final_score" in topk.columns else "",
         "topk_display_scores": ", ".join(f"{float(score):.2f}" for score in (topk["display_score"] if "display_score" in topk.columns else topk.get("similarity_score", pd.Series(dtype=float))).tolist()) if not topk.empty else "",
+        "topk_soft_accuracy_scores": soft_metrics["topk_soft_accuracy_scores"],
         "ground_truth_ids": ", ".join(sorted(relevant_ids)),
         "ground_truth_file_names": ", ".join(sorted(ground_truth["relevant_file_names"])),
         "ground_truth_line_numbers": ", ".join(map(str, sorted(ground_truth["relevant_line_numbers"]))),
@@ -135,6 +156,11 @@ def aggregate_metric_rows(detail: pd.DataFrame, top_k: int) -> dict[str, Any]:
             "macro_recall_at_k": 0.0,
             "macro_accuracy_at_1": 0.0,
             "macro_f1_at_k": 0.0,
+            "macro_soft_precision_at_k": 0.0,
+            "macro_soft_recall_at_k": 0.0,
+            "macro_soft_accuracy_at_1": 0.0,
+            "macro_soft_f1_at_k": 0.0,
+            "macro_mean_soft_accuracy_at_k": 0.0,
             "micro_precision_at_k": 0.0,
             "micro_recall_at_k": 0.0,
             "micro_f1_at_k": 0.0,
@@ -158,6 +184,11 @@ def aggregate_metric_rows(detail: pd.DataFrame, top_k: int) -> dict[str, Any]:
         "macro_recall_at_k": float(detail["recall_at_k"].mean()),
         "macro_accuracy_at_1": float(detail["accuracy_at_1"].mean()),
         "macro_f1_at_k": float(detail["f1_at_k"].mean()),
+        "macro_soft_precision_at_k": float(detail["soft_precision_at_k"].mean()) if "soft_precision_at_k" in detail.columns else 0.0,
+        "macro_soft_recall_at_k": float(detail["soft_recall_at_k"].mean()) if "soft_recall_at_k" in detail.columns else 0.0,
+        "macro_soft_accuracy_at_1": float(detail["soft_accuracy_at_1"].mean()) if "soft_accuracy_at_1" in detail.columns else 0.0,
+        "macro_soft_f1_at_k": float(detail["soft_f1_at_k"].mean()) if "soft_f1_at_k" in detail.columns else 0.0,
+        "macro_mean_soft_accuracy_at_k": float(detail["mean_soft_accuracy_at_k"].mean()) if "mean_soft_accuracy_at_k" in detail.columns else 0.0,
         "micro_precision_at_k": micro_precision,
         "micro_recall_at_k": micro_recall,
         "micro_f1_at_k": micro_f1,

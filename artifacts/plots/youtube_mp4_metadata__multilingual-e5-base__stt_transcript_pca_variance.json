@@ -1,0 +1,20 @@
+{
+  "model_alias": "multilingual-e5-base",
+  "text_source": "stt_transcript",
+  "artifact_namespace": "youtube_mp4_metadata",
+  "explained_variance_ratio": [
+    0.13885614275932312,
+    0.12428682297468185,
+    0.10115910321474075
+  ],
+  "components_shape": [
+    3,
+    768
+  ],
+  "pc_contribution_summary": {
+    "PC1": 0.13885614275932312,
+    "PC2": 0.12428682297468185,
+    "PC3": 0.10115910321474075
+  },
+  "cumulative_first3": 0.3643020689487457
+}

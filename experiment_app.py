@@ -13,6 +13,7 @@ from src.config import CLUSTERS_DIR, DEFAULT_QUERYSET_CSV, INCREMENTAL_RUN_SUMMA
 from src.embedding.build_indices import DenseSearchEngine, artifact_stem
 from src.embedding.vector_models import list_available_models
 from src.evaluation.evaluate import evaluate_all, evaluation_artifact_path
+from src.evaluation.ground_truth import build_metadata_token_query_row
 from src.evaluation.metrics_report import (
     DEFAULT_HALLUCINATION_THRESHOLD,
     build_incremental_probe_queryset,
@@ -20,6 +21,7 @@ from src.evaluation.metrics_report import (
     normalize_ground_truth_queryset,
     resolve_relevant_ids,
 )
+from src.evaluation.soft_metrics import f1_score
 from src.ingest.incremental_registry import load_incremental_run_summary
 from src.search.keyword_search import KeywordSearchEngine
 from src.search.load_realdata_dataset import dataset_artifact_namespace, load_search_metadata
@@ -48,10 +50,21 @@ PLOT_MODE_OPTIONS = {
 SEARCH_TABLE_COLUMNS = [
     "rank",
     "file_name",
+    "is_relevant",
     "similarity_score",
-    "accuracy",
+    "matched_tokens",
+    "title_match_count",
+    "description_match_count",
+    "tags_match_count",
+    "transcript_match_count",
+    "lexical_score",
+    "semantic_score",
+    "final_score",
+    "reason",
     "precision",
+    "recall",
     "f1_score",
+    "accuracy",
     "hallucination_flag",
     "search_location",
     "query_preview",
@@ -92,27 +105,48 @@ def metadata_content_token(metadata: pd.DataFrame, text_source: str) -> str:
     if metadata.empty:
         digest.update(b"__empty__")
         return digest.hexdigest()
-    primary_texts = metadata.apply(lambda row: resolve_primary_text(row, text_source=text_source), axis=1)
-    for doc_id, primary_text in zip(metadata["id"].astype(str).tolist(), primary_texts.astype(str).tolist()):
+    normalized = metadata.fillna("")
+    primary_texts = normalized.apply(lambda row: resolve_primary_text(row, text_source=text_source), axis=1)
+    for row, primary_text in zip(normalized.itertuples(index=False), primary_texts.astype(str).tolist()):
+        doc_id = str(getattr(row, "id", ""))
         digest.update(doc_id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(getattr(row, "title", "")).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(getattr(row, "category", "")).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(getattr(row, "keywords", "")).encode("utf-8", errors="ignore"))
         digest.update(b"\0")
         digest.update(primary_text.encode("utf-8", errors="ignore"))
         digest.update(b"\n")
     return digest.hexdigest()
 
 
-def evaluation_content_token(metadata: pd.DataFrame, query_catalog: pd.DataFrame) -> str:
+def evaluation_content_token(
+    metadata: pd.DataFrame,
+    query_catalog: pd.DataFrame,
+    text_sources: tuple[str, ...],
+    top_k: int,
+) -> str:
     digest = hashlib.sha1()
-    digest.update(b"evaluation")
+    digest.update(b"evaluation-explainable-search-v3")
+    digest.update(str(top_k).encode("utf-8"))
+    digest.update("|".join(text_sources).encode("utf-8"))
     for row in metadata.fillna("").itertuples(index=False):
         digest.update(str(getattr(row, "id", "")).encode("utf-8", errors="ignore"))
         digest.update(b"\0")
-        digest.update(str(getattr(row, "stt_transcript", "")).encode("utf-8", errors="ignore"))
+        for field in ["title", "description", "tags", "keywords", "stt_transcript", "original_transcript"]:
+            digest.update(str(getattr(row, field, "")).encode("utf-8", errors="ignore"))
+            digest.update(b"\0")
         digest.update(b"\n")
     for row in query_catalog.fillna("").itertuples(index=False):
         digest.update(str(getattr(row, "query_id", "")).encode("utf-8", errors="ignore"))
         digest.update(b"\0")
         digest.update(str(getattr(row, "query", "")).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(getattr(row, "relevant_ids", "")).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(getattr(row, "relevant_count", "")).encode("utf-8", errors="ignore"))
         digest.update(b"\n")
     return digest.hexdigest()
 
@@ -149,13 +183,30 @@ def load_incremental_summary(summary_token: str) -> dict[str, Any]:
     return load_incremental_run_summary(INCREMENTAL_RUN_SUMMARY_JSON)
 
 
-def build_query_catalog(metadata: pd.DataFrame, artifact_namespace: str) -> tuple[pd.DataFrame, Path]:
-    base_queryset = load_base_queryset(file_token(DEFAULT_QUERYSET_CSV))
-    if base_queryset.empty:
-        base_queryset = build_incremental_probe_queryset(metadata, set(metadata["id"].fillna("").astype(str)))
-    catalog = normalize_ground_truth_queryset(base_queryset, metadata).reset_index(drop=True)
+def _catalog_with_relevant_docs(catalog: pd.DataFrame) -> pd.DataFrame:
     if catalog.empty:
-        probe_queryset = build_incremental_probe_queryset(metadata, set(metadata["id"].fillna("").astype(str)))
+        return catalog
+    relevant_counts = pd.to_numeric(catalog["relevant_count"], errors="coerce").fillna(0)
+    relevant_ids = catalog["relevant_ids"].fillna("").astype(str).str.strip()
+    return catalog.loc[relevant_counts.gt(0) & relevant_ids.ne("")].reset_index(drop=True)
+
+
+def build_query_catalog(metadata: pd.DataFrame, artifact_namespace: str) -> tuple[pd.DataFrame, Path]:
+    target_ids = set(metadata["id"].fillna("").astype(str))
+    probe_queryset = build_incremental_probe_queryset(metadata, target_ids)
+    probe_catalog = _catalog_with_relevant_docs(
+        normalize_ground_truth_queryset(probe_queryset, metadata)
+    )
+
+    base_queryset = load_base_queryset(file_token(DEFAULT_QUERYSET_CSV))
+    base_catalog = _catalog_with_relevant_docs(
+        normalize_ground_truth_queryset(base_queryset, metadata)
+    )
+
+    catalog = pd.concat([probe_catalog, base_catalog], ignore_index=True)
+    if not catalog.empty:
+        catalog = catalog.drop_duplicates(subset=["query_id"], keep="first").reset_index(drop=True)
+    if catalog.empty:
         catalog = normalize_ground_truth_queryset(probe_queryset, metadata).reset_index(drop=True)
 
     catalog_path = evaluation_artifact_path("query_catalog.json", artifact_namespace)
@@ -227,7 +278,7 @@ def annotate_search_results(
         precision = hits / rank
         recall = hits / max(1, len(relevant_ids))
         accuracy = 1.0 if rank == 1 and is_relevant else 0.0
-        f1 = 0.0 if precision + recall == 0 else (2 * precision * recall) / (precision + recall)
+        f1 = f1_score(precision, recall)
         similarity = float(getattr(row, "similarity_score", 0.0) or 0.0)
         hallucination = bool((not is_relevant) and similarity >= hallucination_threshold)
         rows.append(
@@ -253,23 +304,43 @@ def build_query_summary(system_name: str, annotated: pd.DataFrame, relevant_ids:
     precision = hits / max(1, predicted_count)
     recall = hits / max(1, len(relevant_ids))
     accuracy = float(bool(not annotated.empty and bool(annotated.iloc[0]["is_relevant"])))
-    f1 = 0.0 if precision + recall == 0 else (2 * precision * recall) / (precision + recall)
+    f1 = f1_score(precision, recall)
     hallucination_count = int((annotated["hallucination_flag"] == "YES").sum()) if not annotated.empty else 0
     return {
         "system_name": system_name,
-        f"Recall@{top_k}": recall,
-        f"Precision@{top_k}": precision,
-        "Accuracy@1": accuracy,
-        f"F1@{top_k}": f1,
-        "Hallucination 수": hallucination_count,
-        "Hallucination 비율": hallucination_count / max(1, predicted_count),
-        "평균 Similarity": float(annotated["similarity_score"].mean()) if not annotated.empty else 0.0,
+        "relevant_count": len(relevant_ids),
+        f"top_{top_k}_hit_count": hits,
+        f"top_{top_k}_result_count": predicted_count,
+        f"precision@{top_k}": precision,
+        f"recall@{top_k}": recall,
+        f"f1@{top_k}": f1,
+        "accuracy@1_reference": accuracy,
+        "metric_definition": "precision/recall/f1 are calculated from retrieved ids and ground truth relevant ids; accuracy is only a top-1 reference.",
+        "hallucination_count": hallucination_count,
+        "hallucination_rate": hallucination_count / max(1, predicted_count),
+        "mean_final_score": float(annotated["final_score"].mean()) if "final_score" in annotated.columns and not annotated.empty else 0.0,
+        "mean_similarity_score": float(annotated["similarity_score"].mean()) if not annotated.empty else 0.0,
     }
 
 
 def build_search_table(annotated: pd.DataFrame) -> pd.DataFrame:
     display = annotated.copy()
-    for column in ["similarity_score", "accuracy", "precision", "recall", "f1_score"]:
+    for column in [
+        "similarity_score",
+        "accuracy",
+        "precision",
+        "recall",
+        "f1_score",
+        "title_match_count",
+        "description_match_count",
+        "tags_match_count",
+        "transcript_match_count",
+        "field_weight_score",
+        "ranker_score",
+        "lexical_score",
+        "semantic_score",
+        "final_score",
+    ]:
         if column in display.columns:
             display[column] = display[column].astype(float).round(4)
     available = [column for column in SEARCH_TABLE_COLUMNS if column in display.columns]
@@ -395,23 +466,99 @@ def evaluation_text_sources(metadata: pd.DataFrame) -> tuple[str, ...]:
     return tuple(sources or ["stt_transcript"])
 
 
-def ensure_evaluation_artifacts(metadata: pd.DataFrame, query_catalog: pd.DataFrame, artifact_namespace: str) -> None:
+def ensure_evaluation_artifacts(
+    metadata: pd.DataFrame,
+    query_catalog: pd.DataFrame,
+    artifact_namespace: str,
+    top_k: int,
+) -> None:
+    text_sources = evaluation_text_sources(metadata)
+    current_token = evaluation_content_token(metadata, query_catalog, text_sources, top_k)
+    manifest_path = evaluation_artifact_path("retrieval_eval_manifest.json", artifact_namespace)
     required_paths = [
         evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace),
         evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace),
         evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace),
     ]
-    if all(path.exists() for path in required_paths):
-        return
-    evaluate_all(
+    if all(path.exists() for path in required_paths) and manifest_path.exists():
+        try:
+            manifest = load_json(manifest_path)
+        except Exception:
+            manifest = {}
+        if manifest.get("token") == current_token:
+            return
+
+    outputs = evaluate_all(
         metadata=metadata,
         queryset=query_catalog,
-        text_sources=evaluation_text_sources(metadata),
+        text_sources=text_sources,
         include_optional=False,
         artifact_namespace=artifact_namespace,
+        top_k=top_k,
         print_report=False,
         show_weights=False,
     )
+    save_json(
+        manifest_path,
+        {
+            "token": current_token,
+            "top_k": top_k,
+            "text_sources": list(text_sources),
+            "query_count": int(len(query_catalog)),
+            "summary_rows": int(len(outputs["summary"])),
+        },
+    )
+
+
+def format_query_option(query_id: str, query_catalog: pd.DataFrame) -> str:
+    matched = query_catalog.loc[query_catalog["query_id"].astype(str) == str(query_id)]
+    if matched.empty:
+        return str(query_id)
+    row = matched.iloc[0]
+    file_names = str(row.get("relevant_file_names", "")).strip()
+    query = str(row.get("query", "")).strip()
+    target = file_names or query
+    if target:
+        return f"{query_id} | {truncate_text(target, 72)}"
+    return str(query_id)
+
+
+def relevant_file_summary(query_row: pd.Series, metadata: pd.DataFrame) -> str:
+    relevant_ids = resolve_relevant_ids(query_row, metadata)
+    if not relevant_ids:
+        return "정답 문서가 없습니다. 이 질의는 점수 계산에서 제외되어야 합니다."
+    matched = metadata.loc[metadata["id"].fillna("").astype(str).isin(relevant_ids)]
+    names = matched["file_name"].fillna("").astype(str).tolist()
+    if names:
+        return f"정답 문서 {len(relevant_ids)}개: {', '.join(names[:3])}" + (" ..." if len(names) > 3 else "")
+    return f"정답 문서 {len(relevant_ids)}개: {', '.join(sorted(relevant_ids)[:3])}"
+
+
+def resolve_query_row_for_search(
+    query_catalog: pd.DataFrame,
+    selected_query_id: str,
+    query: str,
+    metadata: pd.DataFrame,
+    text_source: str,
+) -> pd.Series:
+    query_text = str(query or "").strip()
+    if not query_catalog.empty:
+        exact_query = query_catalog.loc[
+            query_catalog["query"].fillna("").astype(str).str.strip() == query_text
+        ] if query_text else pd.DataFrame()
+        matched = query_catalog.loc[query_catalog["query_id"].astype(str) == str(selected_query_id)]
+        if not exact_query.empty:
+            row = exact_query.iloc[0].copy()
+        elif not matched.empty and (not query_text or query_text == str(matched.iloc[0].get("query", "")).strip()):
+            row = matched.iloc[0].copy()
+        elif query_text:
+            row = build_metadata_token_query_row(query_text, metadata, text_source=text_source)
+        else:
+            row = matched.iloc[0].copy() if not matched.empty else query_catalog.iloc[0].copy()
+    else:
+        row = build_metadata_token_query_row(query_text, metadata, text_source=text_source)
+    row["query_preview"] = truncate_text(row.get("query", ""), 80)
+    return row
 
 
 def build_plot_frame(
@@ -549,13 +696,15 @@ def main() -> None:
     default_query = query_catalog.iloc[0]["query"] if not query_catalog.empty else "유튜브 전사 검색"
 
     with st.sidebar:
+        query_options = query_catalog["query_id"].astype(str).tolist() if not query_catalog.empty else ["manual"]
         selected_query_id = st.selectbox(
             "평가/검색 질의",
-            options=query_catalog["query_id"].tolist() if not query_catalog.empty else ["manual"],
+            options=query_options,
             index=0,
+            format_func=lambda query_id: format_query_option(query_id, query_catalog),
         )
         selected_query_row = (
-            query_catalog.loc[query_catalog["query_id"] == selected_query_id].iloc[0]
+            query_catalog.loc[query_catalog["query_id"].astype(str) == str(selected_query_id)].iloc[0]
             if not query_catalog.empty
             else pd.Series({"query_id": "manual", "query": default_query})
         )
@@ -564,9 +713,8 @@ def main() -> None:
         cluster_plot_mode = st.selectbox("클러스터 보기 모드", options=list(PLOT_MODE_OPTIONS.keys()), index=0)
         vector_color_by = st.selectbox("벡터 색상 기준", options=["category", "cluster_id", "source_type"], index=0)
 
-    query_row = selected_query_row.copy()
-    query_row["query"] = query
-    query_row["query_preview"] = truncate_text(query, 80)
+    query_row = resolve_query_row_for_search(query_catalog, selected_query_id, query, metadata, search_source)
+    relevant_summary = relevant_file_summary(query_row, metadata)
 
     metadata_token = metadata_content_token(metadata, search_source)
     with st.spinner("검색/시각화 아티팩트 확인 중..."):
@@ -593,8 +741,9 @@ def main() -> None:
         ]
     )
 
-    ensure_evaluation_artifacts(metadata, query_catalog, artifact_namespace)
-    eval_token = evaluation_content_token(metadata, query_catalog)
+    eval_text_sources = evaluation_text_sources(metadata)
+    ensure_evaluation_artifacts(metadata, query_catalog, artifact_namespace, top_k=top_k)
+    eval_token = evaluation_content_token(metadata, query_catalog, eval_text_sources, top_k)
     eval_summary = load_eval_summary(artifact_namespace, eval_token)
     eval_detail = load_eval_detail(artifact_namespace, eval_token)
     eval_comparison = load_eval_comparison(artifact_namespace, eval_token)
@@ -605,6 +754,7 @@ def main() -> None:
 
     with tab_search:
         st.subheader("검색 비교")
+        st.caption(relevant_summary)
         st.dataframe(query_summary.round(4), use_container_width=True, hide_index=True)
         if not eval_summary.empty:
             st.markdown("**평균 평가 요약**")

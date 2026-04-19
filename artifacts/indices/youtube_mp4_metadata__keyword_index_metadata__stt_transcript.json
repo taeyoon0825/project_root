@@ -4,7 +4,7 @@
     "tfidf"
   ],
   "text_source": "stt_transcript",
-  "document_count": 1,
+  "document_count": 17,
   "columns": [
     "id",
     "source_type",
@@ -25,6 +25,13 @@
     "stt_model_name",
     "processing_status",
     "error_message",
+    "description",
+    "tags",
+    "input_kind",
+    "source_mtime",
+    "source_size",
+    "source_hash",
+    "last_ingested_at",
     "primary_text",
     "search_text"
   ],

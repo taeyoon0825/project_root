@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube STT Retrieval Experiment</title>
+  <script src="/assets/plotly.min.js"></script>
+  <style>
+    :root {
+      --bg: #f6f7f8;
+      --surface: #ffffff;
+      --ink: #1f2528;
+      --muted: #637078;
+      --line: #d7dee2;
+      --accent: #0f766e;
+      --accent-strong: #0b5d56;
+      --danger: #b42318;
+      --warn: #8a5a00;
+      --soft: #e8f3f1;
+      --shadow: 0 1px 2px rgba(20, 28, 32, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, "Noto Sans KR", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+      padding: 18px 24px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    h2 {
+      font-size: 18px;
+      margin-bottom: 12px;
+    }
+
+    h3 {
+      font-size: 15px;
+      margin-bottom: 10px;
+    }
+
+    .subtle {
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    main {
+      padding: 18px 24px 32px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 12px;
+      align-items: end;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field.wide {
+      grid-column: span 2;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+
+    select,
+    input[type="text"],
+    input[type="number"],
+    input[type="file"],
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      padding: 8px 9px;
+      font: inherit;
+      min-height: 36px;
+    }
+
+    textarea {
+      min-height: 260px;
+      resize: vertical;
+      font-family: Consolas, "Courier New", monospace;
+      white-space: pre-wrap;
+    }
+
+    button {
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #ffffff;
+      padding: 9px 12px;
+      min-height: 36px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #ffffff;
+      color: var(--accent-strong);
+    }
+
+    button.tab {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+      font-weight: 600;
+    }
+
+    button.tab.active {
+      background: var(--soft);
+      border-color: var(--accent);
+      color: var(--accent-strong);
+    }
+
+    .source-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      min-height: 36px;
+      align-items: center;
+    }
+
+    .source-list label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--ink);
+      margin: 0;
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+    }
+
+    .status {
+      min-height: 24px;
+      margin: 8px 0 14px;
+      color: var(--muted);
+    }
+
+    .status.error {
+      color: var(--danger);
+      font-weight: 700;
+    }
+
+    .status.ok {
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 14px;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      max-height: 440px;
+      background: #ffffff;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 640px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #eef3f4;
+      z-index: 1;
+    }
+
+    td {
+      max-width: 420px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .summary-line {
+      background: var(--soft);
+      border: 1px solid #c8e2de;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+
+    .plot {
+      width: 100%;
+      height: 680px;
+      border: 1px solid var(--line);
+      background: #ffffff;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      overflow: auto;
+      background: #f0f2f3;
+      border: 1px solid var(--line);
+      padding: 10px;
+      max-height: 300px;
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      padding: 10px;
+      background: #ffffff;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 18px;
+      margin-top: 4px;
+    }
+
+    @media (max-width: 1100px) {
+      .controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .field.wide {
+        grid-column: span 2;
+      }
+
+      .grid-2,
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      header,
+      main {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      .field.wide {
+        grid-column: span 1;
+      }
+
+      table {
+        min-width: 560px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>YouTube STT Retrieval Experiment</h1>
+    <div class="subtle">MP4/WAV 전사 결과 검색, 평가, 벡터 분포, 클러스터 확인</div>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div class="field">
+        <label>검색 텍스트 기준</label>
+        <select id="textSource"></select>
+      </div>
+      <div class="field">
+        <label>키워드 방식</label>
+        <select id="keywordMethod"></select>
+      </div>
+      <div class="field">
+        <label>Dense 모델 A</label>
+        <select id="modelA"></select>
+      </div>
+      <div class="field">
+        <label>Dense 모델 B</label>
+        <select id="modelB"></select>
+      </div>
+      <div class="field">
+        <label>Top-K</label>
+        <input id="topK" type="number" min="1" max="50" value="5">
+      </div>
+      <div class="field">
+        <label>클러스터 방식</label>
+        <select id="clusterMethod"></select>
+      </div>
+      <div class="field wide">
+        <label>평가/검색 질의</label>
+        <select id="queryId"></select>
+      </div>
+      <div class="field wide">
+        <label>검색 문장</label>
+        <input id="queryText" type="text" value="">
+      </div>
+      <div class="field">
+        <button id="runSearch">검색 실행</button>
+      </div>
+      <div class="field wide">
+        <label>MP4/WAV 파일 추가</label>
+        <input id="mediaUpload" type="file" accept=".mp4,.wav,video/mp4,audio/wav,audio/x-wav">
+      </div>
+      <div class="field">
+        <label>업로드 제목</label>
+        <input id="uploadTitle" type="text" value="">
+      </div>
+      <div class="field">
+        <label>업로드 태그</label>
+        <input id="uploadTags" type="text" value="">
+      </div>
+      <div class="field wide">
+        <label>업로드 설명</label>
+        <input id="uploadDescription" type="text" value="">
+      </div>
+      <div class="field">
+        <label>Whisper 모델</label>
+        <select id="whisperModel">
+          <option value="base" selected>base</option>
+          <option value="small">small</option>
+          <option value="medium">medium</option>
+        </select>
+      </div>
+      <div class="field">
+        <button id="uploadMedia" class="secondary">파일 추가하기</button>
+      </div>
+    </section>
+
+    <div id="status" class="status">초기화 중</div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="search">검색 비교</button>
+      <button class="tab" data-tab="detail">문서 비교</button>
+      <button class="tab" data-tab="vectors">벡터 분포</button>
+      <button class="tab" data-tab="clusters">클러스터</button>
+      <button class="tab" data-tab="eval">평가</button>
+      <button class="tab" data-tab="data">데이터셋</button>
+    </nav>
+
+    <section id="tab-search" class="tab-panel active">
+      <div id="relevantSummary" class="summary-line">정답 문서 정보 없음</div>
+      <div class="panel">
+        <h2>검색 요약</h2>
+        <div id="querySummary"></div>
+      </div>
+      <div class="grid-3">
+        <div class="panel">
+          <h3 id="keywordTitle">키워드</h3>
+          <div id="keywordTable"></div>
+        </div>
+        <div class="panel">
+          <h3 id="denseATitle">Dense A</h3>
+          <div id="denseATable"></div>
+        </div>
+        <div class="panel">
+          <h3 id="denseBTitle">Dense B</h3>
+          <div id="denseBTable"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>질의 JSON</h2>
+        <pre id="queryJson">{}</pre>
+      </div>
+    </section>
+
+    <section id="tab-detail" class="tab-panel">
+      <div class="panel">
+        <h2>문서 선택</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label>문서 ID</label>
+            <select id="docId"></select>
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="loadDoc" class="secondary">문서 보기</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>문서 정보</h2>
+        <div id="docInfo"></div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <h2>STT 전사</h2>
+          <textarea id="sttTranscript" readonly></textarea>
+        </div>
+        <div class="panel">
+          <h2>원문/대체 텍스트</h2>
+          <textarea id="originalTranscript" readonly></textarea>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>라인 보기</h2>
+        <div id="lineTable"></div>
+      </div>
+    </section>
+
+    <section id="tab-vectors" class="tab-panel">
+      <div class="panel">
+        <h2>벡터 분포</h2>
+        <div class="grid-3">
+          <div class="field">
+            <label>벡터 분포 모드</label>
+            <select id="vectorPlotMode"></select>
+          </div>
+          <div class="field">
+            <label>색상 기준</label>
+            <select id="vectorColorBy"></select>
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="loadVectorPlots" class="secondary">그래프 갱신</button>
+          </div>
+        </div>
+      </div>
+      <div class="metric-row" id="pcaMetrics"></div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3 id="plotATitle">모델 A</h3>
+          <div id="plotA" class="plot"></div>
+        </div>
+        <div class="panel">
+          <h3 id="plotBTitle">모델 B</h3>
+          <div id="plotB" class="plot"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-clusters" class="tab-panel">
+      <div class="panel">
+        <h2>클러스터</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label>클러스터 보기 모드</label>
+            <select id="clusterPlotMode"></select>
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="loadClusterPlots" class="secondary">클러스터 갱신</button>
+          </div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3 id="clusterATitle">모델 A</h3>
+          <div id="clusterSummaryA"></div>
+          <div id="clusterPlotA" class="plot"></div>
+          <h3>대표 문서</h3>
+          <div id="representativesA"></div>
+        </div>
+        <div class="panel">
+          <h3 id="clusterBTitle">모델 B</h3>
+          <div id="clusterSummaryB"></div>
+          <div id="clusterPlotB" class="plot"></div>
+          <h3>대표 문서</h3>
+          <div id="representativesB"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-eval" class="tab-panel">
+      <div class="panel">
+        <h2>시스템 평균 요약</h2>
+        <div id="evalSummary"></div>
+      </div>
+      <div class="panel">
+        <h2>텍스트 소스 비교</h2>
+        <div id="evalComparison"></div>
+      </div>
+      <div class="panel">
+        <h2>질의별 상세</h2>
+        <div id="evalDetail"></div>
+      </div>
+    </section>
+
+    <section id="tab-data" class="tab-panel">
+      <div class="panel">
+        <h2>데이터셋</h2>
+        <div id="datasetMeta"></div>
+      </div>
+      <div class="panel">
+        <h2>카테고리 분포</h2>
+        <div id="categoryPlot" class="plot"></div>
+      </div>
+      <div class="panel">
+        <h2>모델/가중치 상태</h2>
+        <div id="modelWeights"></div>
+      </div>
+      <div class="panel">
+        <h2>질의 카탈로그</h2>
+        <div id="queryCatalog"></div>
+      </div>
+      <div class="panel">
+        <h2>메타데이터 미리보기</h2>
+        <div id="metadataPreview"></div>
+      </div>
+      <div class="panel">
+        <h2>증분 실행 요약</h2>
+        <pre id="runSummary">{}</pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      options: null,
+      search: null
+    };
+
+    const el = (id) => document.getElementById(id);
+
+    function setStatus(message, type = "") {
+      const status = el("status");
+      status.textContent = message;
+      status.className = `status ${type}`;
+    }
+
+    async function apiGet(path) {
+      const res = await fetch(path);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "요청 실패");
+      return data;
+    }
+
+    async function apiPost(path, payload) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "요청 실패");
+      return data;
+    }
+
+    async function apiUpload(path, formData) {
+      const res = await fetch(path, {
+        method: "POST",
+        body: formData
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "업로드 실패");
+      return data;
+    }
+
+    function fillSelect(id, values, selected) {
+      const select = el(id);
+      select.innerHTML = "";
+      values.forEach((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        if (value === selected) option.selected = true;
+        select.appendChild(option);
+      });
+    }
+
+    function renderSourceTypes(values, defaults) {
+      const root = el("sourceTypes");
+      if (!root) return;
+      root.innerHTML = "";
+      values.forEach((value) => {
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = value;
+        checkbox.checked = defaults.includes(value);
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(value));
+        root.appendChild(label);
+      });
+    }
+
+    function selectedSourceTypes() {
+      const root = el("sourceTypes");
+      if (!root) return [];
+      return Array.from(root.querySelectorAll("input:checked")).map((item) => item.value);
+    }
+
+    function formatQueryLabel(row) {
+      const fileNames = row.relevant_file_names || "";
+      const query = row.query || "";
+      const target = fileNames || query;
+      const short = String(target).length > 72 ? String(target).slice(0, 69) + "..." : target;
+      return `${row.query_id} | ${short}`;
+    }
+
+    function fillQueries(table) {
+      const rows = table?.rows || [];
+      const select = el("queryId");
+      select.innerHTML = "";
+      rows.forEach((row) => {
+        const option = document.createElement("option");
+        option.value = row.query_id;
+        option.textContent = formatQueryLabel(row);
+        option.dataset.query = row.query || "";
+        select.appendChild(option);
+      });
+      if (rows.length) {
+        el("queryText").value = rows[0].query || "";
+      }
+    }
+
+    function formatValue(value) {
+      if (value === null || value === undefined) return "";
+      if (typeof value === "number") {
+        if (!Number.isFinite(value)) return "";
+        if (Math.abs(value) >= 1000) return value.toFixed(0);
+        return Number.isInteger(value) ? String(value) : value.toFixed(4);
+      }
+      if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+      return String(value);
+    }
+
+    function renderTable(id, table) {
+      const root = el(id);
+      const columns = table?.columns || [];
+      const rows = table?.rows || [];
+      if (!columns.length || !rows.length) {
+        root.innerHTML = "<div class=\"subtle\">표시할 데이터가 없습니다.</div>";
+        return;
+      }
+      const head = columns.map((column) => `<th>${column}</th>`).join("");
+      const body = rows.map((row) => {
+        const cells = columns.map((column) => `<td title="${String(formatValue(row[column])).replaceAll('"', '&quot;')}">${formatValue(row[column])}</td>`).join("");
+        return `<tr>${cells}</tr>`;
+      }).join("");
+      root.innerHTML = `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+
+    function renderKeyValue(id, rows) {
+      renderTable(id, {
+        columns: ["field", "value"],
+        rows
+      });
+    }
+
+    function collectPayload() {
+      return {
+        sourceTypes: selectedSourceTypes(),
+        textSource: el("textSource").value,
+        keywordMethod: el("keywordMethod").value,
+        modelA: el("modelA").value,
+        modelB: el("modelB").value,
+        topK: Number(el("topK").value || 5),
+        clusterMethod: el("clusterMethod").value,
+        queryId: el("queryId").value,
+        query: el("queryText").value
+      };
+    }
+
+    function renderDataset(dataset) {
+      if (!dataset) return;
+      renderKeyValue("datasetMeta", [
+        {field: "metadata_path", value: dataset.metadataPath},
+        {field: "artifact_namespace", value: dataset.artifactNamespace},
+        {field: "document_count", value: dataset.documentCount}
+      ]);
+      renderTable("modelWeights", dataset.modelWeights);
+      renderTable("queryCatalog", dataset.queryCatalog);
+      renderTable("metadataPreview", dataset.metadataPreview);
+      el("runSummary").textContent = JSON.stringify(dataset.runSummary || {}, null, 2);
+      const categories = dataset.categoryCounts || [];
+      const fig = {
+        data: [{
+          type: "bar",
+          x: categories.map((row) => row.category),
+          y: categories.map((row) => row.count),
+          marker: {color: "#0f766e"}
+        }],
+        layout: {margin: {l: 40, r: 20, t: 20, b: 80}, height: 520}
+      };
+      Plotly.react("categoryPlot", fig.data, fig.layout, {responsive: true});
+    }
+
+    function updateDocOptions(ids) {
+      const select = el("docId");
+      select.innerHTML = "";
+      (ids || []).forEach((id) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = id;
+        select.appendChild(option);
+      });
+    }
+
+    async function runSearch() {
+      setStatus("검색과 평가를 실행 중입니다.");
+      try {
+        const data = await apiPost("/api/search", collectPayload());
+        state.search = data;
+        fillQueries(data.queryCatalog);
+        el("queryId").value = data.selectedQuery.query_id;
+        el("queryText").value = data.selectedQuery.query || "";
+        el("relevantSummary").textContent = data.relevantSummary || "정답 문서 정보 없음";
+        el("queryJson").textContent = JSON.stringify(data.selectedQuery, null, 2);
+        el("keywordTitle").textContent = `키워드 / ${el("keywordMethod").value.toUpperCase()}`;
+        el("denseATitle").textContent = `Dense / ${el("modelA").value}`;
+        el("denseBTitle").textContent = `Dense / ${el("modelB").value}`;
+        renderTable("querySummary", data.querySummary);
+        renderTable("keywordTable", data.tables.keyword);
+        renderTable("denseATable", data.tables.denseA);
+        renderTable("denseBTable", data.tables.denseB);
+        renderTable("evalSummary", data.evalSummary);
+        renderTable("evalDetail", data.evalDetail);
+        renderTable("evalComparison", data.evalComparison);
+        renderDataset(data.dataset);
+        updateDocOptions(data.candidateIds);
+        if (data.candidateIds && data.candidateIds.length) await loadDocument();
+        setStatus("검색과 평가가 완료되었습니다.", "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function uploadMedia() {
+      const fileInput = el("mediaUpload");
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        setStatus("추가할 MP4 또는 WAV 파일을 선택하세요.", "error");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("title", el("uploadTitle").value || "");
+      formData.append("tags", el("uploadTags").value || "");
+      formData.append("description", el("uploadDescription").value || "");
+      formData.append("whisperModel", el("whisperModel").value || "base");
+      formData.append("language", "ko");
+
+      setStatus("파일 저장, WAV 변환, STT 변환을 실행 중입니다. 큰 파일은 시간이 걸립니다.");
+      try {
+        const result = await apiUpload("/api/upload", formData);
+        const options = await apiGet("/api/options");
+        state.options = options;
+        renderSourceTypes(options.sourceTypes, options.defaultSourceTypes);
+        fillSelect("vectorColorBy", options.colorFields, "category");
+        fillQueries(options.queryCatalog);
+        el("textSource").value = "stt_transcript";
+        el("queryText").value = result.searchQuery || result.title || file.name;
+        fileInput.value = "";
+        setStatus(`${result.message} 저장 위치: ${result.uploadRoot}`, "ok");
+        await runSearch();
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function loadDocument() {
+      const docId = el("docId").value;
+      if (!docId) return;
+      setStatus("문서를 불러오는 중입니다.");
+      try {
+        const data = await apiPost("/api/document", {
+          sourceTypes: selectedSourceTypes(),
+          textSource: el("textSource").value,
+          docId
+        });
+        renderKeyValue("docInfo", data.info);
+        el("sttTranscript").value = data.sttTranscript || "";
+        el("originalTranscript").value = data.originalTranscript || "";
+        renderTable("lineTable", data.lines);
+        setStatus("문서를 불러왔습니다.", "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    function renderPcaMetrics(payload) {
+      const ratios = payload?.pcaVariance?.explained_variance_ratio || [];
+      if (!ratios.length) {
+        el("pcaMetrics").innerHTML = "";
+        return;
+      }
+      const cumulative = payload.pcaVariance.cumulative_first3 ?? 0;
+      el("pcaMetrics").innerHTML = [
+        ["PC1", ratios[0] || 0],
+        ["PC2", ratios[1] || 0],
+        ["PC3", ratios[2] || 0],
+        ["PC1+PC2+PC3", cumulative]
+      ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${Number(value).toFixed(4)}</strong></div>`).join("");
+    }
+
+    async function loadSinglePlot(targetId, titleId, modelAlias, plotMode, colorBy, summaryId, repsId) {
+      const payload = collectPayload();
+      payload.modelAlias = modelAlias;
+      payload.plotMode = plotMode;
+      payload.colorBy = colorBy;
+      const data = await apiPost("/api/plot", payload);
+      Plotly.react(targetId, data.figure.data, data.figure.layout, {responsive: true});
+      el(titleId).textContent = `${modelAlias} / ${plotMode}`;
+      if (summaryId) {
+        const summary = data.clusterSummary || {};
+        renderKeyValue(summaryId, Object.keys(summary).map((key) => ({field: key, value: summary[key]})));
+      }
+      if (repsId) renderTable(repsId, data.representatives);
+      renderPcaMetrics(data);
+    }
+
+    async function loadVectorPlots() {
+      setStatus("벡터 그래프를 갱신 중입니다.");
+      try {
+        const mode = el("vectorPlotMode").value;
+        const colorBy = el("vectorColorBy").value;
+        await loadSinglePlot("plotA", "plotATitle", el("modelA").value, mode, colorBy);
+        await loadSinglePlot("plotB", "plotBTitle", el("modelB").value, mode, colorBy);
+        setStatus("벡터 그래프가 갱신되었습니다.", "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function loadClusterPlots() {
+      setStatus("클러스터 그래프를 갱신 중입니다.");
+      try {
+        const mode = el("clusterPlotMode").value;
+        await loadSinglePlot("clusterPlotA", "clusterATitle", el("modelA").value, mode, "cluster_id", "clusterSummaryA", "representativesA");
+        await loadSinglePlot("clusterPlotB", "clusterBTitle", el("modelB").value, mode, "cluster_id", "clusterSummaryB", "representativesB");
+        setStatus("클러스터 그래프가 갱신되었습니다.", "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    function activateTab(name) {
+      document.querySelectorAll(".tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === name));
+      document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${name}`));
+    }
+
+    async function init() {
+      try {
+        const options = await apiGet("/api/options");
+        state.options = options;
+        renderSourceTypes(options.sourceTypes, options.defaultSourceTypes);
+        fillSelect("textSource", options.textSources, "stt_transcript");
+        fillSelect("keywordMethod", options.keywordMethods, "bm25");
+        fillSelect("modelA", options.modelAliases, options.modelAliases[0]);
+        fillSelect("modelB", options.modelAliases, options.modelAliases[Math.min(1, options.modelAliases.length - 1)]);
+        fillSelect("clusterMethod", options.clusterMethods, "kmeans");
+        fillSelect("vectorPlotMode", options.plotModes, "PCA 3D");
+        fillSelect("clusterPlotMode", options.plotModes, "PCA 3D");
+        fillSelect("vectorColorBy", options.colorFields, "category");
+        fillQueries(options.queryCatalog);
+        document.querySelectorAll(".tab").forEach((button) => button.addEventListener("click", () => activateTab(button.dataset.tab)));
+        el("queryId").addEventListener("change", () => {
+          const selected = el("queryId").selectedOptions[0];
+          el("queryText").value = selected?.dataset?.query || "";
+        });
+        el("runSearch").addEventListener("click", runSearch);
+        el("uploadMedia").addEventListener("click", uploadMedia);
+        el("loadDoc").addEventListener("click", loadDocument);
+        el("loadVectorPlots").addEventListener("click", loadVectorPlots);
+        el("loadClusterPlots").addEventListener("click", loadClusterPlots);
+        setStatus("초기화가 완료되었습니다.", "ok");
+        await runSearch();
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

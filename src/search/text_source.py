@@ -46,6 +46,8 @@ def build_search_text(row: pd.Series, text_source: str = DEFAULT_TEXT_SOURCE) ->
     return " ".join(
         [
             normalize_text_for_search(_safe_value(row, "title")),
+            normalize_text_for_search(_safe_value(row, "description")),
+            normalize_text_for_search(_safe_value(row, "tags")),
             normalize_text_for_search(_safe_value(row, "category")),
             normalize_text_for_search(_safe_value(row, "keywords")),
             primary_text,

@@ -10,6 +10,7 @@ import pandas as pd
 from src.config import DEFAULT_METADATA_CSV, EMBEDDINGS_DIR, INDICES_DIR, ensure_project_dirs
 from src.data.metadata_schema import ensure_metadata_columns, load_metadata_frame
 from src.embedding.vector_models import EmbeddingModelWrapper, list_available_models
+from src.search.explainability import SEMANTIC_SCORE_WEIGHT, explain_frame
 from src.search.match_locator import locate_best_dense_match
 from src.search.text_source import (
     DEFAULT_TEXT_SOURCE,
@@ -274,19 +275,33 @@ class DenseSearchEngine:
             )
 
         query_embedding = self.encode_query(query)
-        raw_scores = self.embeddings @ query_embedding
-        normalized_scores = np.clip((raw_scores + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
+        semantic_raw_scores = self.embeddings @ query_embedding
+        semantic_normalized_scores = np.clip((semantic_raw_scores + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
 
         result_frame = self.metadata.copy()
-        result_frame["raw_score"] = raw_scores
-        result_frame["normalized_score"] = normalized_scores
-        result_frame["display_score"] = normalized_scores * 100.0
+        result_frame["semantic_raw_score"] = semantic_raw_scores
+        result_frame["semantic_normalized_score"] = semantic_normalized_scores
+        result_frame = explain_frame(
+            result_frame,
+            query,
+            text_source=self.text_source,
+            semantic_scores=[score * SEMANTIC_SCORE_WEIGHT for score in semantic_normalized_scores],
+            score_kind="cosine_similarity",
+        )
+        result_frame["raw_score"] = result_frame["final_score"].astype(float)
+        result_frame["normalized_score"] = _normalize_scores(result_frame["final_score"].to_numpy())
+        result_frame["display_score"] = result_frame["normalized_score"] * 100.0
         result_frame["similarity_score"] = result_frame["display_score"]
         result_frame["search_source"] = self.text_source
-        result_frame["score_kind"] = "cosine_similarity"
+        result_frame["score_kind"] = "weighted_lexical_semantic"
         result_frame["raw_score_explanation"] = (
             "raw_score는 L2 정규화된 임베딩 간 내적이며 cosine similarity와 동일합니다. "
             "display_score는 cosine similarity를 0~100 범위로 선형 변환한 값입니다."
+        )
+        result_frame["raw_score_explanation"] = (
+            "final_score = lexical_score + semantic_score. "
+            "lexical_score = title*5 + tags*4 + description*3 + transcript*2. "
+            f"semantic_score = cosine similarity normalized score*{SEMANTIC_SCORE_WEIGHT:.1f}."
         )
         result_frame["preview"] = result_frame.apply(
             lambda row: build_preview_text(row, text_source=self.text_source),
@@ -295,7 +310,7 @@ class DenseSearchEngine:
         result_frame["transcript_preview"] = result_frame["preview"]
         result_frame["original_preview"] = result_frame["original_transcript"].str.slice(0, 140) + "..."
         result_frame["stt_preview"] = result_frame["stt_transcript"].str.slice(0, 140) + "..."
-        return result_frame.sort_values("raw_score", ascending=False).reset_index(drop=True)
+        return result_frame.sort_values("final_score", ascending=False).reset_index(drop=True)
 
     def search(self, query: str, top_k: int = 10) -> pd.DataFrame:
         result_frame = self.score_all(query).head(top_k).reset_index(drop=True)
@@ -322,9 +337,22 @@ class DenseSearchEngine:
                 "stt_txt_path",
                 "category",
                 "raw_score",
+                "semantic_raw_score",
+                "semantic_normalized_score",
                 "normalized_score",
                 "display_score",
                 "similarity_score",
+                "matched_tokens",
+                "title_match_count",
+                "description_match_count",
+                "tags_match_count",
+                "transcript_match_count",
+                "field_weight_score",
+                "ranker_score",
+                "lexical_score",
+                "semantic_score",
+                "final_score",
+                "reason",
                 "score_kind",
                 "raw_score_explanation",
                 "best_match_summary",
@@ -344,7 +372,8 @@ def _normalize_scores(scores: np.ndarray) -> np.ndarray:
     min_score = float(scores.min())
     max_score = float(scores.max())
     if abs(max_score - min_score) < 1e-12:
-        return np.ones_like(scores, dtype=np.float32)
+        fill_value = 1.0 if max_score > 0 else 0.0
+        return np.full_like(scores, fill_value, dtype=np.float32)
     return ((scores - min_score) / (max_score - min_score)).astype(np.float32)
 
 

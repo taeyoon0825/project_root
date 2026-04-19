@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 from src.config import AUDIO_STT_DIR, DEFAULT_METADATA_CSV, WHISPER_CACHE_DIR, ensure_project_dirs
@@ -17,6 +18,11 @@ except ImportError:  # pragma: no cover
 def _safe_stem(value: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_\-]+", "_", value.strip())
     return cleaned.strip("._") or "transcript"
+
+
+def _safe_print(message: str) -> None:
+    encoding = sys.stdout.encoding or "utf-8"
+    print(str(message).encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 def _row_source_type(row) -> str:
@@ -81,7 +87,7 @@ def transcribe_audio_batch(
         candidate_indices.append(row_index)
 
     if not candidate_indices:
-        print("[STT] No target files selected. STT skipped.")
+        _safe_print("[STT] No target files selected. STT skipped.")
         return metadata_path
 
     model = whisper.load_model(model_name, download_root=str(WHISPER_CACHE_DIR))
@@ -95,13 +101,13 @@ def transcribe_audio_batch(
         stt_txt_path = _resolve_stt_output_path(row, row_index)
         stt_txt_path.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"[stt {progress_index}/{total}] {row.get('file_name', row.get('id', 'unknown'))}")
+        _safe_print(f"[stt {progress_index}/{total}] {row.get('file_name', row.get('id', 'unknown'))}")
         if not audio_path.exists():
             message = f"Audio file does not exist: {audio_path}"
             metadata.at[row_index, "processing_status"] = "stt_audio_missing"
             metadata.at[row_index, "error_message"] = message
             if skip_errors:
-                print(f"  - skipped: {message}")
+                _safe_print(f"  - skipped: {message}")
                 continue
             raise FileNotFoundError(message)
 
@@ -124,7 +130,7 @@ def transcribe_audio_batch(
                         "segments": result.get("segments", []),
                     },
                 )
-                print(f"  - transcribed to {stt_txt_path}")
+                _safe_print(f"  - transcribed to {stt_txt_path}")
             else:
                 transcript = stt_txt_path.read_text(encoding="utf-8").strip()
                 segments_path = _segments_output_path(stt_txt_path)
@@ -137,7 +143,7 @@ def transcribe_audio_batch(
                             "segments": [],
                         },
                     )
-                print(f"  - reused existing transcript {stt_txt_path}")
+                _safe_print(f"  - reused existing transcript {stt_txt_path}")
 
             metadata.at[row_index, "stt_transcript"] = transcript
             metadata.at[row_index, "stt_txt_path"] = str(stt_txt_path.resolve())
@@ -153,7 +159,7 @@ def transcribe_audio_batch(
             metadata.at[row_index, "processing_status"] = "stt_error"
             metadata.at[row_index, "error_message"] = str(exc)
             if skip_errors:
-                print(f"  - failed: {exc}")
+                _safe_print(f"  - failed: {exc}")
                 continue
             raise
 
@@ -181,7 +187,7 @@ def main() -> None:
         source_type=args.source_type,
         skip_errors=args.skip_errors,
     )
-    print(f"STT transcription completed. Metadata updated at {output_path}")
+    _safe_print(f"STT transcription completed. Metadata updated at {output_path}")
 
 
 if __name__ == "__main__":

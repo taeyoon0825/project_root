@@ -4,6 +4,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.search.explainability import explain_match
+
 
 GROUND_TRUTH_COLUMNS = [
     "query_id",
@@ -55,6 +57,7 @@ def _truncate_text(text: Any, length: int = 80) -> str:
 
 
 def resolve_relevant_ids(query_row: pd.Series, metadata: pd.DataFrame) -> set[str]:
+    metadata_ids = set(metadata["id"].fillna("").astype(str)) if "id" in metadata.columns else set()
     explicit_ids = set(_split_values(query_row.get("relevant_id", "")))
     explicit_ids.update(_split_values(query_row.get("relevant_ids", "")))
 
@@ -68,7 +71,7 @@ def resolve_relevant_ids(query_row: pd.Series, metadata: pd.DataFrame) -> set[st
         explicit_ids.update(set(matched_ids))
 
     if explicit_ids:
-        return explicit_ids
+        return explicit_ids & metadata_ids if metadata_ids else explicit_ids
 
     filtered = metadata.copy()
     target_category = str(query_row.get("target_category", "")).strip()
@@ -183,6 +186,51 @@ def normalize_ground_truth_queryset(queryset: pd.DataFrame, metadata: pd.DataFra
         )
 
     return pd.DataFrame(rows, columns=GROUND_TRUTH_COLUMNS)
+
+
+def build_metadata_token_query_row(
+    query: str,
+    metadata: pd.DataFrame,
+    text_source: str = "stt_transcript",
+) -> pd.Series:
+    query_text = str(query or "").strip()
+    relevant_rows: list[dict[str, Any]] = []
+    if query_text:
+        for _, row in metadata.iterrows():
+            explanation = explain_match(row, query_text, text_source=text_source)
+            matched_count = (
+                int(explanation["title_match_count"])
+                + int(explanation["description_match_count"])
+                + int(explanation["tags_match_count"])
+                + int(explanation["transcript_match_count"])
+            )
+            if matched_count > 0:
+                relevant_rows.append(
+                    {
+                        "id": str(row.get("id", "")),
+                        "file_name": str(row.get("file_name", "")),
+                    }
+                )
+
+    relevant_ids = [row["id"] for row in relevant_rows if row["id"]]
+    relevant_file_names = [row["file_name"] for row in relevant_rows if row["file_name"]]
+    return pd.Series(
+        {
+            "query_id": "manual_metadata_token_match",
+            "query": query_text,
+            "query_preview": _truncate_text(query_text),
+            "target_category": "",
+            "target_source_type": "",
+            "relevant_ids": ", ".join(dict.fromkeys(relevant_ids)),
+            "relevant_file_names": ", ".join(dict.fromkeys(relevant_file_names)),
+            "relevant_line_numbers": "",
+            "relevant_segment_indexes": "",
+            "relevant_segment_texts": "",
+            "relevant_count": len(dict.fromkeys(relevant_ids)),
+            "evaluation_level": "file",
+            "ground_truth_rule": "derived_from_metadata_token_match",
+        }
+    )
 
 
 def build_incremental_probe_queryset(metadata: pd.DataFrame, target_ids: set[str]) -> pd.DataFrame:
