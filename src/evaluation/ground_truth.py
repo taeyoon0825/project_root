@@ -5,6 +5,8 @@ from typing import Any
 import pandas as pd
 
 from src.search.explainability import explain_match
+from src.search.match_locator import simple_tokenize
+from src.search.text_source import build_search_text
 
 
 GROUND_TRUTH_COLUMNS = [
@@ -54,6 +56,10 @@ def _truncate_text(text: Any, length: int = 80) -> str:
     if len(value) <= length:
         return value
     return value[: length - 3] + "..."
+
+
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
 
 
 def resolve_relevant_ids(query_row: pd.Series, metadata: pd.DataFrame) -> set[str]:
@@ -194,9 +200,28 @@ def build_metadata_token_query_row(
     text_source: str = "stt_transcript",
 ) -> pd.Series:
     query_text = str(query or "").strip()
-    relevant_rows: list[dict[str, Any]] = []
+    normalized_query = _normalize_text(query_text)
+    query_tokens = list(dict.fromkeys(simple_tokenize(query_text)))
+    exact_match_rows: list[dict[str, Any]] = []
+    all_token_rows: list[dict[str, Any]] = []
+    fallback_rows: list[dict[str, Any]] = []
+
     if query_text:
         for _, row in metadata.iterrows():
+            row_id = str(row.get("id", "")).strip()
+            file_name = str(row.get("file_name", "")).strip()
+            search_text = _normalize_text(build_search_text(row, text_source=text_source))
+            search_tokens = set(simple_tokenize(search_text))
+            record = {"id": row_id, "file_name": file_name}
+
+            if normalized_query and normalized_query in search_text:
+                exact_match_rows.append(record)
+                continue
+
+            if query_tokens and all(token in search_tokens for token in query_tokens):
+                all_token_rows.append(record)
+                continue
+
             explanation = explain_match(row, query_text, text_source=text_source)
             matched_count = (
                 int(explanation["title_match_count"])
@@ -205,15 +230,27 @@ def build_metadata_token_query_row(
                 + int(explanation["transcript_match_count"])
             )
             if matched_count > 0:
-                relevant_rows.append(
-                    {
-                        "id": str(row.get("id", "")),
-                        "file_name": str(row.get("file_name", "")),
-                    }
-                )
+                fallback_rows.append(record)
 
-    relevant_ids = [row["id"] for row in relevant_rows if row["id"]]
-    relevant_file_names = [row["file_name"] for row in relevant_rows if row["file_name"]]
+    if exact_match_rows:
+        relevant_rows = exact_match_rows
+        ground_truth_rule = "derived_from_exact_phrase_match"
+    elif all_token_rows:
+        relevant_rows = all_token_rows
+        ground_truth_rule = "derived_from_all_query_tokens"
+    else:
+        relevant_rows = fallback_rows
+        ground_truth_rule = "derived_from_metadata_token_match"
+
+    unique_rows = list(
+        {
+            (row["id"], row["file_name"]): row
+            for row in relevant_rows
+            if row["id"] or row["file_name"]
+        }.values()
+    )
+    relevant_ids = [row["id"] for row in unique_rows if row["id"]]
+    relevant_file_names = [row["file_name"] for row in unique_rows if row["file_name"]]
     return pd.Series(
         {
             "query_id": "manual_metadata_token_match",
@@ -228,7 +265,7 @@ def build_metadata_token_query_row(
             "relevant_segment_texts": "",
             "relevant_count": len(dict.fromkeys(relevant_ids)),
             "evaluation_level": "file",
-            "ground_truth_rule": "derived_from_metadata_token_match",
+            "ground_truth_rule": ground_truth_rule,
         }
     )
 

@@ -37,28 +37,11 @@ Desktop.ini
 *.log
 *.tmp
 *.temp
+*.csv
 
-# Generated datasets and audio outputs
-data/raw/
-data/processed/
-data/audio/
-
-# Keep deployment metadata tracked
-!data/metadata/
-!data/metadata/*.csv
-
-# Keep deployment artifacts tracked
-!artifacts/
-!artifacts/embeddings/
-!artifacts/indices/
-!artifacts/plots/
-!artifacts/clusters/
-!artifacts/evaluation/
-!artifacts/**/*.csv
-!artifacts/**/*.json
-!artifacts/**/*.npy
-!artifacts/**/*.faiss
-!artifacts/**/*.joblib
+# Local project data / generated artifacts
+data/
+artifacts/
 
 # Large model / index / binary artifacts
 *.pt
@@ -79,18 +62,3 @@ data/audio/
 *.mkv
 *.avi
 *.webm
-
-# Final allow-list for Streamlit deployment assets
-!data/metadata/
-!data/metadata/*.csv
-!artifacts/
-!artifacts/embeddings/
-!artifacts/indices/
-!artifacts/plots/
-!artifacts/clusters/
-!artifacts/evaluation/
-!artifacts/**/*.csv
-!artifacts/**/*.json
-!artifacts/**/*.npy
-!artifacts/**/*.faiss
-!artifacts/**/*.joblib

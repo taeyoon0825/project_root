@@ -371,15 +371,14 @@
         <select id="clusterMethod"></select>
       </div>
       <div class="field wide">
-        <label>평가/검색 질의</label>
-        <select id="queryId"></select>
-      </div>
-      <div class="field wide">
         <label>검색 문장</label>
-        <input id="queryText" type="text" value="">
+        <input id="queryText" type="text" value="" placeholder="전체 데이터 파일에서 찾을 문장을 직접 입력">
       </div>
       <div class="field">
         <button id="runSearch">검색 실행</button>
+      </div>
+      <div class="field wide">
+        <div class="subtle">검색 문장을 입력하면 현재 전체 데이터 파일을 대상으로 검색하고, 유사도 및 평가 지표를 계산합니다.</div>
       </div>
       <div class="field wide">
         <label>MP4/WAV 파일 추가</label>
@@ -663,30 +662,6 @@
       return Array.from(root.querySelectorAll("input:checked")).map((item) => item.value);
     }
 
-    function formatQueryLabel(row) {
-      const fileNames = row.relevant_file_names || "";
-      const query = row.query || "";
-      const target = fileNames || query;
-      const short = String(target).length > 72 ? String(target).slice(0, 69) + "..." : target;
-      return `${row.query_id} | ${short}`;
-    }
-
-    function fillQueries(table) {
-      const rows = table?.rows || [];
-      const select = el("queryId");
-      select.innerHTML = "";
-      rows.forEach((row) => {
-        const option = document.createElement("option");
-        option.value = row.query_id;
-        option.textContent = formatQueryLabel(row);
-        option.dataset.query = row.query || "";
-        select.appendChild(option);
-      });
-      if (rows.length) {
-        el("queryText").value = rows[0].query || "";
-      }
-    }
-
     function formatValue(value) {
       if (value === null || value === undefined) return "";
       if (typeof value === "number") {
@@ -730,7 +705,7 @@
         modelB: el("modelB").value,
         topK: Number(el("topK").value || 5),
         clusterMethod: el("clusterMethod").value,
-        queryId: el("queryId").value,
+        queryId: "",
         query: el("queryText").value
       };
     }
@@ -771,13 +746,16 @@
     }
 
     async function runSearch() {
+      const typedQuery = (el("queryText").value || "").trim();
+      if (!typedQuery) {
+        setStatus("검색 문장을 입력해 주세요.", "error");
+        return;
+      }
       setStatus("검색과 평가를 실행 중입니다.");
       try {
         const data = await apiPost("/api/search", collectPayload());
         state.search = data;
-        fillQueries(data.queryCatalog);
-        el("queryId").value = data.selectedQuery.query_id;
-        el("queryText").value = data.selectedQuery.query || "";
+        el("queryText").value = typedQuery;
         el("relevantSummary").textContent = data.relevantSummary || "정답 문서 정보 없음";
         el("queryJson").textContent = JSON.stringify(data.selectedQuery, null, 2);
         el("keywordTitle").textContent = `키워드 / ${el("keywordMethod").value.toUpperCase()}`;
@@ -821,7 +799,6 @@
         state.options = options;
         renderSourceTypes(options.sourceTypes, options.defaultSourceTypes);
         fillSelect("vectorColorBy", options.colorFields, "category");
-        fillQueries(options.queryCatalog);
         el("textSource").value = "stt_transcript";
         el("queryText").value = result.searchQuery || result.title || file.name;
         fileInput.value = "";
@@ -926,19 +903,13 @@
         fillSelect("vectorPlotMode", options.plotModes, "PCA 3D");
         fillSelect("clusterPlotMode", options.plotModes, "PCA 3D");
         fillSelect("vectorColorBy", options.colorFields, "category");
-        fillQueries(options.queryCatalog);
         document.querySelectorAll(".tab").forEach((button) => button.addEventListener("click", () => activateTab(button.dataset.tab)));
-        el("queryId").addEventListener("change", () => {
-          const selected = el("queryId").selectedOptions[0];
-          el("queryText").value = selected?.dataset?.query || "";
-        });
         el("runSearch").addEventListener("click", runSearch);
         el("uploadMedia").addEventListener("click", uploadMedia);
         el("loadDoc").addEventListener("click", loadDocument);
         el("loadVectorPlots").addEventListener("click", loadVectorPlots);
         el("loadClusterPlots").addEventListener("click", loadClusterPlots);
-        setStatus("초기화가 완료되었습니다.", "ok");
-        await runSearch();
+        setStatus("검색 문장을 입력한 뒤 검색 실행을 누르세요.", "ok");
       } catch (error) {
         setStatus(error.message, "error");
       }

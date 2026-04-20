@@ -739,9 +739,13 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
     keyword_method = str(payload.get("keywordMethod") or "bm25")
     top_k = max(1, min(50, int(payload.get("topK") or 5)))
     cluster_method = str(payload.get("clusterMethod") or "kmeans")
+    query_input = str(payload.get("query") or "").strip()
     model_aliases = list(list_available_models(include_optional=False).keys())
     model_a = str(payload.get("modelA") or model_aliases[0])
     model_b = str(payload.get("modelB") or model_aliases[min(1, len(model_aliases) - 1)])
+
+    if not query_input:
+        return {"ok": False, "error": "검색 문장을 입력해 주세요."}
 
     metadata, metadata_path = _load_filtered_metadata(source_types)
     if metadata.empty:
@@ -749,8 +753,15 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
 
     artifact_namespace = _artifact_namespace(metadata_path, source_types)
     catalog, catalog_path = build_query_catalog(metadata, artifact_namespace)
-    query_row = _selected_query_row(catalog, payload.get("queryId"), payload.get("query"), metadata, text_source)
+    query_row = _selected_query_row(catalog, payload.get("queryId"), query_input, metadata, text_source)
     query = str(query_row.get("query", ""))
+    ui_catalog = catalog.copy()
+    if query:
+        selected_query_frame = pd.DataFrame([query_row.to_dict()])
+        if ui_catalog.empty:
+            ui_catalog = selected_query_frame
+        elif not ui_catalog["query_id"].fillna("").astype(str).eq(str(query_row.get("query_id", ""))).any():
+            ui_catalog = pd.concat([selected_query_frame, ui_catalog], ignore_index=True)
 
     ensure_artifacts(metadata, artifact_namespace, text_source, [model_a, model_b], cluster_method, n_clusters=6)
     keyword_engine = KeywordSearchEngine(metadata, text_source=text_source)
@@ -790,7 +801,7 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         "artifactNamespace": artifact_namespace,
         "metadataPath": str(metadata_path),
         "queryCatalogPath": str(catalog_path),
-        "queryCatalog": _table_payload(catalog),
+        "queryCatalog": _table_payload(ui_catalog),
         "selectedQuery": _json_safe(query_row.to_dict()),
         "relevantSummary": relevant_file_summary(query_row, metadata),
         "querySummary": _table_payload(summary),
@@ -808,7 +819,7 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
             "metadataPath": str(metadata_path),
             "artifactNamespace": artifact_namespace,
             "categoryCounts": _frame_records(category_counts),
-            "queryCatalog": _table_payload(catalog),
+            "queryCatalog": _table_payload(ui_catalog),
             "metadataPreview": _table_payload(metadata.head(30)),
             "modelWeights": _table_payload(build_model_weight_frame(include_optional=False)),
             "runSummary": _json_safe(run_summary),
@@ -985,7 +996,7 @@ class ExperimentHtmlHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the HTML replacement for the Streamlit experiment dashboard.")
+    parser = argparse.ArgumentParser(description="Run the HTML experiment dashboard server.")
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()

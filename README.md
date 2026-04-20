@@ -51,7 +51,7 @@ python run_audio_experiment_pipeline.py --tts-provider edge --whisper-model base
 ### 앱 실행
 
 ```powershell
-streamlit run experiment_app.py
+python html_experiment_app.py
 ```
 
 앱이 열리면 검색 결과에 다음 정보가 함께 표시됩니다.
@@ -74,7 +74,7 @@ python run_audio_experiment_pipeline.py --regenerate-dataset --overwrite-audio -
 ### 2) UI 확인
 
 ```powershell
-streamlit run experiment_app.py
+python html_experiment_app.py
 ```
 
 ## 4. 부분 실행 명령어
