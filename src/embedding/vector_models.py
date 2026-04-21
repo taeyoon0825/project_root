@@ -5,6 +5,7 @@ import os
 import numpy as np
 
 from src.config import EMBEDDING_MODELS, HF_CACHE_DIR, OPTIONAL_MODELS
+from src.utils.device import resolve_torch_device
 
 os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
 os.environ.setdefault("HF_HUB_CACHE", str(HF_CACHE_DIR / "hub"))
@@ -38,8 +39,13 @@ class EmbeddingModelWrapper:
             raise ValueError(f"Unknown model alias: {model_alias}")
         self.model_alias = model_alias
         self.model_name = MODEL_CATALOG[model_alias]
+        self.device = resolve_torch_device()
         if self.model_name not in self._MODEL_CACHE:
-            self._MODEL_CACHE[self.model_name] = SentenceTransformer(self.model_name, cache_folder=str(HF_CACHE_DIR))
+            self._MODEL_CACHE[self.model_name] = SentenceTransformer(
+                self.model_name,
+                cache_folder=str(HF_CACHE_DIR),
+                device=self.device,
+            )
         self.model = self._MODEL_CACHE[self.model_name]
 
     def _prepare_texts(self, texts: list[str], is_query: bool) -> list[str]:
@@ -50,10 +56,11 @@ class EmbeddingModelWrapper:
         return texts
 
     def encode_documents(self, texts: list[str], batch_size: int = 16) -> np.ndarray:
+        configured_batch = int(os.getenv("EMBED_BATCH_SIZE", str(batch_size)).strip() or batch_size)
         prepared = self._prepare_texts(texts, is_query=False)
         embeddings = self.model.encode(
             prepared,
-            batch_size=batch_size,
+            batch_size=max(1, configured_batch),
             show_progress_bar=False,
             convert_to_numpy=True,
             normalize_embeddings=False,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -22,6 +23,13 @@ def _display_score(row: pd.Series) -> float:
 
 def _raw_score(row: pd.Series) -> float:
     return float(row.get("raw_score", 0.0) or 0.0)
+
+
+def _dcg(relevances: list[int]) -> float:
+    score = 0.0
+    for rank, relevance in enumerate(relevances, start=1):
+        score += float(relevance) / math.log2(rank + 1.0)
+    return score
 
 
 def ground_truth_payload(query_row: pd.Series) -> dict[str, Any]:
@@ -62,6 +70,8 @@ def evaluate_ranked_results(
     results: pd.DataFrame,
     query_row: pd.Series,
     top_k: int,
+    *,
+    metric_config: Any | None = None,
 ) -> dict[str, Any]:
     topk = results.head(top_k).reset_index(drop=True)
     ground_truth = ground_truth_payload(query_row)
@@ -83,7 +93,21 @@ def evaluate_ranked_results(
         query_row.get("query", ""),
         relevant_ids,
         top_k=top_k,
+        metric_config=metric_config,
     )
+
+    reciprocal_rank = 0.0
+    binary_relevance: list[int] = []
+    for rank, doc_id in enumerate(predicted_ids, start=1):
+        is_relevant = int(doc_id in relevant_ids)
+        binary_relevance.append(is_relevant)
+        if not reciprocal_rank and is_relevant:
+            reciprocal_rank = 1.0 / rank
+    ideal_relevance = [1] * min(len(relevant_ids), len(binary_relevance))
+    ndcg = 0.0
+    if binary_relevance:
+        ideal_dcg = _dcg(ideal_relevance)
+        ndcg = 0.0 if ideal_dcg == 0 else _dcg(binary_relevance) / ideal_dcg
 
     top1_row = topk.iloc[0] if not topk.empty else pd.Series(dtype=object)
     top1_display_score = _display_score(top1_row) if not topk.empty else 0.0
@@ -105,6 +129,8 @@ def evaluate_ranked_results(
         "recall_at_k": recall,
         "accuracy_at_1": accuracy,
         "f1_at_k": f1,
+        "mrr_at_k": reciprocal_rank,
+        "ndcg_at_k": ndcg,
         **soft_metrics,
         "topk_hit_rate": float(tp > 0),
         "top1_id": str(top1_row.get("id", "")) if not topk.empty else "",
@@ -122,6 +148,10 @@ def evaluate_ranked_results(
         "top1_lexical_score": float(top1_row.get("lexical_score", 0.0) or 0.0) if not topk.empty else 0.0,
         "top1_semantic_score": float(top1_row.get("semantic_score", 0.0) or 0.0) if not topk.empty else 0.0,
         "top1_reason": str(top1_row.get("reason", "")) if not topk.empty else "",
+        "adaptive_field_weights": str(top1_row.get("adaptive_field_weights", "")) if not topk.empty else "",
+        "adaptive_keyword_alpha": float(top1_row.get("adaptive_keyword_alpha", 0.0) or 0.0) if not topk.empty else 0.0,
+        "adaptive_dense_alpha": float(top1_row.get("adaptive_dense_alpha", 0.0) or 0.0) if not topk.empty else 0.0,
+        "adaptive_reason": str(top1_row.get("adaptive_reason", "")) if not topk.empty else "",
         "mean_topk_raw_score": float(topk["raw_score"].astype(float).mean()) if "raw_score" in topk.columns and not topk.empty else 0.0,
         "mean_topk_final_score": float(topk["final_score"].astype(float).mean()) if "final_score" in topk.columns and not topk.empty else 0.0,
         "mean_topk_display_score": float(topk["display_score"].astype(float).mean()) if "display_score" in topk.columns and not topk.empty else float(topk["similarity_score"].astype(float).mean()) if "similarity_score" in topk.columns and not topk.empty else 0.0,
@@ -156,6 +186,8 @@ def aggregate_metric_rows(detail: pd.DataFrame, top_k: int) -> dict[str, Any]:
             "macro_recall_at_k": 0.0,
             "macro_accuracy_at_1": 0.0,
             "macro_f1_at_k": 0.0,
+            "macro_mrr_at_k": 0.0,
+            "macro_ndcg_at_k": 0.0,
             "macro_soft_precision_at_k": 0.0,
             "macro_soft_recall_at_k": 0.0,
             "macro_soft_accuracy_at_1": 0.0,
@@ -170,6 +202,7 @@ def aggregate_metric_rows(detail: pd.DataFrame, top_k: int) -> dict[str, Any]:
             "segment_exact_hit_rate": 0.0,
             "segment_partial_hit_rate": 0.0,
             "mean_top1_display_score": 0.0,
+            "mean_hallucination_threshold": 0.0,
         }
 
     tp = float(detail["tp_at_k"].sum())
@@ -184,6 +217,8 @@ def aggregate_metric_rows(detail: pd.DataFrame, top_k: int) -> dict[str, Any]:
         "macro_recall_at_k": float(detail["recall_at_k"].mean()),
         "macro_accuracy_at_1": float(detail["accuracy_at_1"].mean()),
         "macro_f1_at_k": float(detail["f1_at_k"].mean()),
+        "macro_mrr_at_k": float(detail["mrr_at_k"].mean()) if "mrr_at_k" in detail.columns else 0.0,
+        "macro_ndcg_at_k": float(detail["ndcg_at_k"].mean()) if "ndcg_at_k" in detail.columns else 0.0,
         "macro_soft_precision_at_k": float(detail["soft_precision_at_k"].mean()) if "soft_precision_at_k" in detail.columns else 0.0,
         "macro_soft_recall_at_k": float(detail["soft_recall_at_k"].mean()) if "soft_recall_at_k" in detail.columns else 0.0,
         "macro_soft_accuracy_at_1": float(detail["soft_accuracy_at_1"].mean()) if "soft_accuracy_at_1" in detail.columns else 0.0,
@@ -198,4 +233,5 @@ def aggregate_metric_rows(detail: pd.DataFrame, top_k: int) -> dict[str, Any]:
         "segment_exact_hit_rate": float(detail["topk_segment_exact_hit"].mean()) if "topk_segment_exact_hit" in detail.columns else 0.0,
         "segment_partial_hit_rate": float(detail["topk_segment_partial_hit"].mean()) if "topk_segment_partial_hit" in detail.columns else 0.0,
         "mean_top1_display_score": float(detail["top1_display_score"].mean()) if "top1_display_score" in detail.columns else 0.0,
+        "mean_hallucination_threshold": float(detail["hallucination_threshold_used"].mean()) if "hallucination_threshold_used" in detail.columns else 0.0,
     }

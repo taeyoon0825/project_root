@@ -143,21 +143,21 @@ python -m src.visualize.pca_plot --model-alias multilingual-e5-base --text-sourc
 
 ## 6. 주요 산출물 위치
 
-### 원문 텍스트
+### 로컬 실행 데이터 루트
 
-`data/raw`
+`data/db`
 
-### WAV 오디오
+### 업로드 원본 파일(raw)
 
-`data/audio/wav`
+`data/db/raw`
 
-### Whisper 텍스트
+### STT 세그먼트 CSV
 
-`data/audio/stt_txt`
+`data/db/stt_csv`
 
-### 메타데이터
+### 메타데이터/전사/json 산출물
 
-`data/metadata/dataset_metadata.csv`
+`data/db/json`
 
 ### 임베딩
 
@@ -193,23 +193,23 @@ python -m src.visualize.pca_plot --model-alias multilingual-e5-base --text-sourc
 현재 메타데이터가 있는지 확인:
 
 ```powershell
-Get-Item data\metadata\dataset_metadata.csv
+Get-Item data\db\json\youtube_mp4_metadata.csv
 ```
 
 원문 파일 수 확인:
 
 ```powershell
-(Get-ChildItem data\raw\*.txt).Count
+(Get-ChildItem data\db\raw\*).Count
 ```
 
 WAV 파일 수 확인:
 
 ```powershell
-(Get-ChildItem data\audio\wav\*.wav).Count
+(Get-ChildItem data\db\raw\wav\*.wav).Count
 ```
 
 STT txt 파일 수 확인:
 
 ```powershell
-(Get-ChildItem data\audio\stt_txt\*.txt).Count
+(Get-ChildItem data\db\json\transcripts -Recurse -Filter *.txt).Count
 ```

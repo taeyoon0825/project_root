@@ -9,8 +9,8 @@ from src.stt.batch_transcribe import transcribe_audio_batch
 
 def transcribe_mp4_batch(
     metadata_path: Path = REALDATA_METADATA_CSV,
-    model_name: str = "base",
-    language: str | None = "ko",
+    model_name: str | None = None,
+    language: str | None = None,
     overwrite: bool = False,
     skip_errors: bool = True,
     target_ids: set[str] | None = None,
@@ -29,8 +29,8 @@ def transcribe_mp4_batch(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Transcribe extracted youtube mp4 audio with Whisper.")
     parser.add_argument("--metadata-path", type=Path, default=REALDATA_METADATA_CSV)
-    parser.add_argument("--model-name", type=str, default="base")
-    parser.add_argument("--language", type=str, default="ko")
+    parser.add_argument("--model-name", type=str, default=None)
+    parser.add_argument("--language", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-errors", dest="skip_errors", action="store_true")
     parser.add_argument("--no-skip-errors", dest="skip_errors", action="store_false")

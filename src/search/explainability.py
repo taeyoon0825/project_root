@@ -9,14 +9,12 @@ from src.search.match_locator import simple_tokenize
 from src.search.text_source import DEFAULT_TEXT_SOURCE, resolve_primary_text
 
 
-FIELD_WEIGHTS = {
-    "title": 5.0,
-    "tags": 4.0,
-    "description": 3.0,
-    "transcript": 2.0,
+DEFAULT_FIELD_WEIGHTS = {
+    "title": 1.0,
+    "tags": 1.0,
+    "description": 1.0,
+    "transcript": 1.0,
 }
-RANKER_SCORE_WEIGHT = 3.0
-SEMANTIC_SCORE_WEIGHT = 5.0
 
 
 def unique_query_tokens(query: str) -> list[str]:
@@ -69,31 +67,18 @@ def _reason(
     score_kind: str,
     matched_tokens: list[str],
 ) -> str:
-    field_labels = {
-        "title": "제목",
-        "tags": "태그",
-        "description": "설명",
-        "transcript": "자막",
-    }
-    matched_fields = [field_labels[field] for field, count in counts.items() if count > 0]
-
+    matched_fields = [field for field, count in counts.items() if count > 0]
     parts: list[str] = []
     if matched_fields:
-        parts.append(f"{'·'.join(matched_fields)} metadata에서 검색어 토큰이 확인됨")
-    if counts.get("title", 0) or counts.get("tags", 0):
-        parts.append("제목/태그처럼 가중치가 높은 영역이 점수에 크게 반영됨")
-    if ranker_score >= RANKER_SCORE_WEIGHT * 0.7:
-        parts.append(f"{score_kind.upper()} 보정 점수가 높음")
-    elif ranker_score > 0:
-        parts.append(f"{score_kind.upper()} 보정 점수가 일부 반영됨")
-    if semantic_score >= SEMANTIC_SCORE_WEIGHT * 0.7:
-        parts.append("임베딩 의미 유사도가 높음")
-    elif semantic_score > 0:
-        parts.append("임베딩 의미 유사도가 일부 반영됨")
-    if not parts and matched_tokens:
-        parts.append("낮은 빈도의 metadata 토큰 매칭으로 후보에 포함됨")
+        parts.append(f"matched_fields={','.join(matched_fields)}")
+    if matched_tokens:
+        parts.append(f"matched_tokens={','.join(matched_tokens[:8])}")
+    if ranker_score > 0:
+        parts.append(f"{score_kind}_score={ranker_score:.3f}")
+    if semantic_score > 0:
+        parts.append(f"semantic_score={semantic_score:.3f}")
     if not parts:
-        parts.append("직접 토큰 매칭은 약하지만 보조 점수로 후보에 포함됨")
+        parts.append("retrieved_by_supporting_score")
     return " / ".join(parts)
 
 
@@ -105,6 +90,7 @@ def explain_match(
     ranker_score: float = 0.0,
     semantic_score: float = 0.0,
     score_kind: str = "bm25",
+    field_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     query_tokens = unique_query_tokens(query)
     fields = metadata_field_texts(row, text_source=text_source)
@@ -112,7 +98,8 @@ def explain_match(
     counts = {field: len(tokens) for field, tokens in matches.items()}
     matched_tokens = list(dict.fromkeys(token for tokens in matches.values() for token in tokens))
 
-    field_weight_score = sum(FIELD_WEIGHTS[field] * counts[field] for field in FIELD_WEIGHTS)
+    resolved_weights = {**DEFAULT_FIELD_WEIGHTS, **(field_weights or {})}
+    field_weight_score = sum(resolved_weights[field] * counts[field] for field in DEFAULT_FIELD_WEIGHTS)
     lexical_score = float(field_weight_score) + float(ranker_score)
     final_score = lexical_score + float(semantic_score)
     return {
@@ -138,6 +125,7 @@ def explain_frame(
     ranker_scores: list[float] | pd.Series | None = None,
     semantic_scores: list[float] | pd.Series | None = None,
     score_kind: str = "bm25",
+    field_weights: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
@@ -154,6 +142,7 @@ def explain_frame(
                 ranker_score=float(ranker_values[index]),
                 semantic_score=float(semantic_values[index]),
                 score_kind=score_kind,
+                field_weights=field_weights,
             )
         )
     return pd.concat([frame.reset_index(drop=True), pd.DataFrame(rows)], axis=1)

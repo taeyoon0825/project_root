@@ -28,7 +28,7 @@ def _run_ffmpeg(command: list[str]) -> None:
 def convert_media_to_wav(
     input_path: Path,
     output_path: Path,
-    sample_rate: int = 16000,
+    sample_rate: int | None = None,
     overwrite: bool = True,
 ) -> None:
     require_ffmpeg()
@@ -41,14 +41,14 @@ def convert_media_to_wav(
         "-vn",
         "-ac",
         "1",
-        "-ar",
-        str(sample_rate),
-        str(output_path),
     ]
+    if sample_rate is not None:
+        command.extend(["-ar", str(int(sample_rate))])
+    command.append(str(output_path))
     _run_ffmpeg(command)
 
 
-def convert_to_wav(input_path: Path, output_path: Path, sample_rate: int = 16000) -> None:
+def convert_to_wav(input_path: Path, output_path: Path, sample_rate: int | None = None) -> None:
     convert_media_to_wav(
         input_path=input_path,
         output_path=output_path,

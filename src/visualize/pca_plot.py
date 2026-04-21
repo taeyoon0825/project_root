@@ -4,6 +4,7 @@ import argparse
 import multiprocessing as mp
 import os
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -11,6 +12,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
+from src.adaptive.parameter_resolver import AdaptiveContext, build_adaptive_context, resolve_visualization_config
 from src.config import DEFAULT_METADATA_CSV, EMBEDDINGS_DIR, PLOTS_DIR, ensure_project_dirs
 from src.data.metadata_schema import load_metadata_frame
 from src.embedding.build_indices import DenseSearchEngine, artifact_stem
@@ -40,18 +42,20 @@ def _configure_projection_env() -> None:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 
-def _umap_projection_worker(embeddings: np.ndarray, dimensions: int, output_queue) -> None:
+def _umap_projection_worker(embeddings: np.ndarray, dimensions: int, config: dict[str, Any], output_queue) -> None:
     _configure_projection_env()
     try:
         import umap as umap_module  # type: ignore
 
         reducer = umap_module.UMAP(
             n_components=dimensions,
-            random_state=42,
-            transform_seed=42,
+            random_state=int(config["random_seed"]),
+            transform_seed=int(config["random_seed"]),
             n_jobs=1,
             low_memory=True,
             init="random",
+            n_neighbors=int(config["n_neighbors"]),
+            min_dist=float(config["min_dist"]),
         )
         projected = reducer.fit_transform(embeddings)
         output_queue.put({"ok": True, "projected": projected.tolist()})
@@ -104,14 +108,14 @@ def _pad_projection(projected: np.ndarray, target_dimensions: int) -> np.ndarray
     return np.hstack([projected, padding])
 
 
-def compute_pca_projection(embeddings: np.ndarray) -> tuple[pd.DataFrame, object]:
+def compute_pca_projection(embeddings: np.ndarray, *, random_seed: int) -> tuple[pd.DataFrame, object]:
     if embeddings.shape[0] < 2:
         projected = np.zeros((embeddings.shape[0], 3), dtype=np.float32)
         frame = pd.DataFrame(projected, columns=projection_columns("pca", 3))
         return frame, ZeroProjectionReducer(output_dimensions=3)
 
     n_components = max(1, min(3, embeddings.shape[0], embeddings.shape[1]))
-    pca = PCA(n_components=n_components, random_state=42)
+    pca = PCA(n_components=n_components, random_state=random_seed)
     projected = pca.fit_transform(embeddings)
     projected = _pad_projection(projected, 3)
     frame = pd.DataFrame(projected, columns=projection_columns("pca", 3))
@@ -122,15 +126,16 @@ def compute_optional_projection(
     embeddings: np.ndarray,
     method: str,
     dimensions: int,
+    visualization_config,
 ) -> tuple[pd.DataFrame, object | None]:
     if embeddings.shape[0] <= dimensions:
         raise ValueError(f"{method.upper()} requires more than {dimensions} samples.")
 
     if method == "tsne":
-        perplexity = min(30, max(2, embeddings.shape[0] - 1))
+        perplexity = min(float(visualization_config.tsne_perplexity), max(5.0, embeddings.shape[0] - 1.0))
         reducer = TSNE(
             n_components=dimensions,
-            random_state=42,
+            random_state=visualization_config.random_seed,
             init="pca",
             learning_rate="auto",
             perplexity=perplexity,
@@ -147,7 +152,19 @@ def compute_optional_projection(
             raise RuntimeError(f"Unable to initialize umap: {exc}") from exc
         context = mp.get_context("spawn")
         output_queue = context.Queue()
-        process = context.Process(target=_umap_projection_worker, args=(embeddings, dimensions, output_queue))
+        process = context.Process(
+            target=_umap_projection_worker,
+            args=(
+                embeddings,
+                dimensions,
+                {
+                    "random_seed": visualization_config.random_seed,
+                    "n_neighbors": visualization_config.umap_n_neighbors,
+                    "min_dist": visualization_config.umap_min_dist,
+                },
+                output_queue,
+            ),
+        )
         process.start()
         process.join(timeout=UMAP_TIMEOUT_SECONDS)
         if process.is_alive():
@@ -171,6 +188,7 @@ def build_projection_artifacts(
     text_source: str = DEFAULT_TEXT_SOURCE,
     optional_methods: list[str] | tuple[str, ...] = ("tsne",),
     artifact_namespace: str | None = None,
+    adaptive_context: AdaptiveContext | None = None,
 ) -> dict[str, Path]:
     _configure_projection_env()
     ensure_project_dirs()
@@ -179,26 +197,38 @@ def build_projection_artifacts(
         model_alias,
         text_source=text_source,
         artifact_namespace=artifact_namespace,
+        adaptive_context=adaptive_context,
     )
     dense_engine.load()
     assert dense_engine.embeddings is not None
     metadata = dense_engine.metadata.copy()
     embeddings = dense_engine.embeddings
+    context = dense_engine.adaptive_context or build_adaptive_context(
+        metadata,
+        text_source=text_source,
+        embedding_model_alias=model_alias,
+        embeddings=embeddings,
+        artifact_namespace=artifact_namespace,
+    )
+    visualization_config = resolve_visualization_config(context.profile, embeddings=embeddings)
     stem = artifact_stem(model_alias, text_source, artifact_namespace)
     enabled_methods = set(optional_methods)
 
     outputs: dict[str, Path] = {}
 
-    pca_frame, pca_model = compute_pca_projection(embeddings)
+    pca_frame, pca_model = compute_pca_projection(
+        embeddings,
+        random_seed=visualization_config.random_seed,
+    )
     pca_combined = pd.concat([metadata.reset_index(drop=True), pca_frame], axis=1)
     pca_combined["text_source"] = text_source
     pca_csv = projection_csv_path(model_alias, text_source, "pca", 3, artifact_namespace)
     save_dataframe(pca_csv, pca_combined)
     outputs["pca_3d_csv"] = pca_csv
 
-    pca_model_path = reducer_model_path(model_alias, text_source, "pca", 3, artifact_namespace)
-    joblib.dump(pca_model, pca_model_path)
-    outputs["pca_model"] = pca_model_path
+    pca_model_output = reducer_model_path(model_alias, text_source, "pca", 3, artifact_namespace)
+    joblib.dump(pca_model, pca_model_output)
+    outputs["pca_model"] = pca_model_output
 
     explained = np.asarray(getattr(pca_model, "explained_variance_ratio_", []), dtype=np.float32)
     explained = np.pad(explained, (0, max(0, 3 - len(explained))), constant_values=0.0)
@@ -214,6 +244,8 @@ def build_projection_artifacts(
             "PC3": float(explained[2]),
         },
         "cumulative_first3": float(explained[:3].sum()),
+        "adaptive_visualization": visualization_config.to_dict(),
+        "adaptive_profile": context.profile.to_dict(),
     }
     variance_json_path = PLOTS_DIR / f"{stem}_pca_variance.json"
     save_json(variance_json_path, variance_payload)
@@ -228,7 +260,12 @@ def build_projection_artifacts(
                 model_path.unlink(missing_ok=True)
                 continue
             try:
-                projection_frame, reducer = compute_optional_projection(embeddings, method=method, dimensions=dimensions)
+                projection_frame, reducer = compute_optional_projection(
+                    embeddings,
+                    method=method,
+                    dimensions=dimensions,
+                    visualization_config=visualization_config,
+                )
                 combined = pd.concat([metadata.reset_index(drop=True), projection_frame], axis=1)
                 combined["text_source"] = text_source
                 save_dataframe(csv_path, combined)

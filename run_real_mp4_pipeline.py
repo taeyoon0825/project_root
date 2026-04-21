@@ -21,11 +21,8 @@ from src.data.metadata_schema import empty_metadata_frame, load_metadata_frame
 from src.embedding.build_indices import artifact_stem, build_all_indices
 from src.embedding.vector_models import list_available_models
 from src.evaluation.evaluate import compare_summary_frames, evaluate_all, evaluation_artifact_path
-from src.evaluation.metrics_report import (
-    DEFAULT_HALLUCINATION_THRESHOLD,
-    build_incremental_probe_queryset,
-    format_model_weight_lines,
-)
+from src.evaluation.ground_truth import build_incremental_probe_queryset
+from src.evaluation.reporting import format_model_weight_lines
 from src.ingest.incremental_registry import (
     build_run_summary_payload,
     finalize_registry,
@@ -57,20 +54,19 @@ def _resolve_target_ids(metadata: pd.DataFrame, target_paths: list[Path]) -> set
 
 def _print_incremental_summary(plan: dict) -> None:
     summary = plan["summary"]
-    print(f"[INFO] 전체 유튜브 파일 {summary['total_files']}개 확인")
+    print(f"[INFO] discovered files: {summary['total_files']}")
     print(
-        f"[INFO] 신규 파일 {summary['new_files']}개 / "
-        f"변경 파일 {summary['changed_files']}개 / "
-        f"skip {summary['skipped_files']}개"
+        f"[INFO] new={summary['new_files']} / changed={summary['changed_files']} / "
+        f"skipped={summary['skipped_files']}"
     )
     if summary["missing_files"]:
-        print(f"[INFO] 현재 입력 경로에서 사라진 기존 파일 {summary['missing_files']}개 감지")
+        print(f"[INFO] missing from current input path: {summary['missing_files']}")
 
     target_names = [record.file_name for record in plan["target_records"]]
     if target_names:
-        print(f"[INFO] 이번 실행 처리 대상: {', '.join(target_names)}")
+        print(f"[INFO] selected targets: {', '.join(target_names)}")
     else:
-        print("[INFO] 신규/변경 파일이 없어 원본 처리 단계는 모두 skip 합니다.")
+        print("[INFO] no new or changed files; downstream stages may be skipped")
 
 
 def _index_artifacts_exist(
@@ -101,15 +97,15 @@ def _evaluation_artifacts_exist(artifact_namespace: str | None) -> bool:
 
 def _print_before_after_delta(delta: pd.DataFrame, top_k: int) -> None:
     if delta.empty:
-        print("[EVAL] before/after 비교 대상이 없습니다.")
+        print("[EVAL] no before/after comparison rows were generated.")
         return
     for row in delta.itertuples(index=False):
         print(
             f"[EVAL][DELTA] {row.system_name} / {row.text_source} | "
-            f"Recall@{top_k}: {float(row.recall_at_k_delta):+.4f}, "
-            f"Precision@{top_k}: {float(row.precision_at_k_delta):+.4f}, "
-            f"Accuracy@1: {float(row.accuracy_at_1_delta):+.4f}, "
-            f"F1@{top_k}: {float(row.f1_at_k_delta):+.4f}"
+            f"Recall@{top_k}: {float(getattr(row, 'recall_at_k_delta', 0.0)):+.4f}, "
+            f"Precision@{top_k}: {float(getattr(row, 'precision_at_k_delta', 0.0)):+.4f}, "
+            f"Accuracy@1: {float(getattr(row, 'accuracy_at_1_delta', 0.0)):+.4f}, "
+            f"F1@{top_k}: {float(getattr(row, 'f1_at_k_delta', 0.0)):+.4f}"
         )
 
 
@@ -117,17 +113,17 @@ def run_real_mp4_pipeline(
     input_dir: Path = YOUTUBE_MP4_INPUT_DIR,
     real_metadata_path: Path = REALDATA_METADATA_CSV,
     combined_metadata_path: Path = COMBINED_METADATA_CSV,
-    whisper_model: str = "base",
-    language: str | None = "ko",
+    whisper_model: str | None = None,
+    language: str | None = None,
     recursive: bool = True,
     limit: int | None = None,
-    sample_rate: int = 16000,
+    sample_rate: int | None = None,
     overwrite_audio: bool = False,
     overwrite_stt: bool = False,
     merge_with_dummy: bool = False,
     build_indices_for_search: bool = True,
     include_optional_models: bool = False,
-    n_clusters: int = 6,
+    n_clusters: int | None = None,
     text_sources: tuple[str, ...] = ("stt_transcript",),
     optional_projection_methods: tuple[str, ...] = ("tsne",),
     run_evaluation: bool = True,
@@ -135,8 +131,8 @@ def run_real_mp4_pipeline(
     registry_path: Path = PROCESSED_REGISTRY_CSV,
     compute_hash: bool = False,
     preserve_missing: bool = True,
-    top_k_eval: int = 3,
-    hallucination_threshold: float = DEFAULT_HALLUCINATION_THRESHOLD,
+    top_k_eval: int | None = None,
+    hallucination_threshold: float | None = None,
     compare_before_after: bool = True,
     show_weights: bool = True,
     show_metrics: bool = True,
@@ -156,10 +152,12 @@ def run_real_mp4_pipeline(
                 show_weights=False,
             )
             before_summary = before_outputs["summary"]
+            if "parameter_mode" in before_summary.columns:
+                before_summary = before_summary.loc[before_summary["parameter_mode"] == "adaptive"].reset_index(drop=True)
         except Exception as exc:
-            print(f"[EVAL] before snapshot 생성을 건너뜁니다: {exc}")
+            print(f"[EVAL] unable to generate before snapshot: {exc}")
 
-    print("[1/8] 입력 파일 스캔 및 증분 계획 수립")
+    print("[1/8] Discover files and plan incremental update")
     plan = plan_incremental_update(
         input_dir=input_dir,
         registry_path=registry_path,
@@ -177,7 +175,7 @@ def run_real_mp4_pipeline(
     should_refresh_metadata = bool(target_paths) or should_refresh_full_metadata
 
     if should_refresh_metadata:
-        print("[2/8] metadata 증분 갱신")
+        print("[2/8] Refresh metadata")
         metadata_files = (
             target_paths
             if incremental and target_paths and not should_refresh_full_metadata
@@ -192,18 +190,18 @@ def run_real_mp4_pipeline(
             preserve_missing=preserve_missing,
             compute_hash=compute_hash,
         )
-        print("[INFO] metadata 갱신 완료")
+        print("[INFO] metadata refreshed")
     elif real_metadata_path.exists():
-        print("[2/8] metadata 갱신 skip - 변경 파일 없음")
+        print("[2/8] Refresh metadata skipped - no changed files")
         real_frame = load_metadata_frame(real_metadata_path)
     else:
-        print("[2/8] metadata 갱신 skip - 입력 파일 없음")
+        print("[2/8] Refresh metadata skipped - no input files")
         real_frame = empty_metadata_frame()
 
     target_ids = _resolve_target_ids(real_frame, target_paths)
 
     if target_ids:
-        print("[3/8] 오디오 추출 또는 wav 재사용")
+        print("[3/8] Extract or reuse WAV audio")
         extract_audio_from_metadata(
             metadata_path=real_metadata_path,
             source_type=None,
@@ -212,12 +210,12 @@ def run_real_mp4_pipeline(
             skip_errors=True,
             target_ids=target_ids,
         )
-        print("[INFO] 오디오 준비 완료")
+        print("[INFO] audio preparation complete")
     else:
-        print("[3/8] 오디오 단계 skip - 신규/변경 파일 없음")
+        print("[3/8] Audio stage skipped - no new or changed files")
 
     if target_ids:
-        print("[4/8] Whisper STT 증분 처리")
+        print("[4/8] Whisper STT")
         transcribe_mp4_batch(
             metadata_path=real_metadata_path,
             model_name=whisper_model,
@@ -226,12 +224,12 @@ def run_real_mp4_pipeline(
             skip_errors=True,
             target_ids=target_ids,
         )
-        print("[INFO] STT 완료")
+        print("[INFO] STT complete")
     else:
-        print("[4/8] STT 단계 skip - 신규/변경 파일 없음")
+        print("[4/8] STT skipped - no new or changed files")
 
     if target_ids:
-        print("[5/8] transcript 반영 및 metadata 동기화")
+        print("[5/8] Merge transcripts back into metadata")
         real_frame = build_realdata_metadata(
             input_dir=input_dir,
             metadata_path=real_metadata_path,
@@ -241,9 +239,9 @@ def run_real_mp4_pipeline(
             preserve_missing=preserve_missing,
             compute_hash=compute_hash,
         )
-        print("[INFO] transcript/metadata 반영 완료")
+        print("[INFO] transcript metadata merge complete")
     else:
-        print("[5/8] transcript/metadata 단계 skip - 신규/변경 파일 없음")
+        print("[5/8] Transcript merge skipped - no new or changed files")
 
     if merge_with_dummy:
         merge_metadata_files(
@@ -252,10 +250,10 @@ def run_real_mp4_pipeline(
             skip_missing=True,
         )
         search_metadata_path = combined_metadata_path
-        print("[6/8] dummy + youtube metadata 병합 완료")
+        print("[6/8] Using merged dummy + real metadata")
     else:
         search_metadata_path = real_metadata_path
-        print("[6/8] youtube metadata 단독 사용")
+        print("[6/8] Using real metadata only")
 
     artifact_namespace = dataset_artifact_namespace(search_metadata_path)
     search_metadata = load_metadata_frame(search_metadata_path) if search_metadata_path.exists() else empty_metadata_frame()
@@ -266,12 +264,7 @@ def run_real_mp4_pipeline(
     built_models: list[tuple[str, str]] = []
     indices_rebuilt = False
     if should_rebuild_indices:
-        print("[7/8] 검색 인덱스 및 시각화 산출물 갱신")
-        if target_ids:
-            print(
-                "[INFO] 원본 변환과 STT는 신규/변경 파일만 처리합니다. "
-                "dense index는 append를 우선 시도하고, projection/clustering은 전역 좌표 일관성을 위해 안전하게 재계산합니다."
-            )
+        print("[7/8] Build retrieval, projection, and clustering artifacts")
         for text_source in text_sources:
             KeywordSearchEngine(search_metadata, text_source=text_source).export_index_metadata(
                 artifact_namespace=artifact_namespace
@@ -285,7 +278,7 @@ def run_real_mp4_pipeline(
         )
         indices_rebuilt = True
         for model_alias, text_source in built_models:
-            print(f"[INFO] dense index 갱신: {model_alias} / {text_source}")
+            print(f"[INFO] updated dense index: {model_alias} / {text_source}")
             build_projection_artifacts(
                 search_metadata,
                 model_alias,
@@ -312,17 +305,17 @@ def run_real_mp4_pipeline(
                         artifact_namespace=artifact_namespace,
                     )
                 except Exception as exc:
-                    print(f"[INFO] HDBSCAN skip: {model_alias} / {text_source} / {exc}")
-        print("[INFO] embedding/index 최소 갱신 완료")
+                    print(f"[INFO] HDBSCAN skipped: {model_alias} / {text_source} / {exc}")
+        print("[INFO] retrieval artifacts updated")
     else:
-        print("[7/8] 검색 인덱스 단계 skip - 변경 파일 없음")
+        print("[7/8] Artifact build skipped - nothing changed")
 
     evaluation_ran = False
     after_outputs: dict[str, pd.DataFrame] | None = None
     if run_evaluation:
         evaluation_needed = bool(target_ids) or not _evaluation_artifacts_exist(artifact_namespace) or compare_before_after
         if evaluation_needed:
-            print("[8/8] 평가 및 리포트 생성")
+            print("[8/8] Evaluation")
             after_outputs = evaluate_all(
                 metadata_path=search_metadata_path,
                 text_sources=text_sources,
@@ -337,7 +330,7 @@ def run_real_mp4_pipeline(
             if target_ids:
                 probe_queryset = build_incremental_probe_queryset(search_metadata, target_ids)
                 if not probe_queryset.empty:
-                    print("[EVAL] 신규/변경 파일 Recall 우선 probe 평가")
+                    print("[EVAL] incremental probe evaluation")
                     evaluate_all(
                         metadata=search_metadata,
                         queryset=probe_queryset,
@@ -348,19 +341,26 @@ def run_real_mp4_pipeline(
                         hallucination_threshold=hallucination_threshold,
                         print_report=True,
                         show_weights=False,
+                        include_static_reference=False,
                     )
             if compare_before_after and not before_summary.empty:
-                delta = compare_summary_frames(before_summary, after_outputs["summary"])
+                adaptive_after = after_outputs["summary"]
+                if "parameter_mode" in adaptive_after.columns:
+                    adaptive_after = adaptive_after.loc[adaptive_after["parameter_mode"] == "adaptive"].reset_index(drop=True)
+                delta = compare_summary_frames(before_summary, adaptive_after)
                 delta_path = evaluation_artifact_path("retrieval_eval_delta.csv", artifact_namespace)
                 save_dataframe(delta_path, delta)
-                _print_before_after_delta(delta, top_k=top_k_eval)
+                comparison_path = evaluation_artifact_path("retrieval_eval_mode_comparison.csv", artifact_namespace)
+                if comparison_path.exists():
+                    print(f"[EVAL] adaptive vs static comparison: {comparison_path}")
+                _print_before_after_delta(delta, top_k=top_k_eval or 3)
         else:
-            print("[8/8] 평가 skip - 변경 파일 없고 기존 결과 재사용")
+            print("[8/8] Evaluation skipped - cached results are still valid")
             if show_weights:
                 for line in format_model_weight_lines(include_optional=include_optional_models):
                     print(line)
     else:
-        print("[8/8] 평가 skip")
+        print("[8/8] Evaluation skipped")
         if show_weights:
             for line in format_model_weight_lines(include_optional=include_optional_models):
                 print(line)
@@ -395,9 +395,9 @@ def main() -> None:
     parser.add_argument("--real-metadata-path", type=Path, default=REALDATA_METADATA_CSV)
     parser.add_argument("--combined-metadata-path", type=Path, default=COMBINED_METADATA_CSV)
     parser.add_argument("--registry-path", type=Path, default=PROCESSED_REGISTRY_CSV)
-    parser.add_argument("--whisper-model", type=str, default="base")
-    parser.add_argument("--language", type=str, default="ko")
-    parser.add_argument("--sample-rate", type=int, default=16000)
+    parser.add_argument("--whisper-model", type=str, default=None)
+    parser.add_argument("--language", type=str, default=None)
+    parser.add_argument("--sample-rate", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--overwrite-audio", action="store_true")
     parser.add_argument("--overwrite-stt", action="store_true")
@@ -415,9 +415,9 @@ def main() -> None:
     parser.add_argument("--skip-indices", dest="build_indices_for_search", action="store_false")
     parser.set_defaults(build_indices_for_search=True)
     parser.add_argument("--include-optional-models", action="store_true")
-    parser.add_argument("--n-clusters", type=int, default=6)
-    parser.add_argument("--top-k-eval", type=int, default=3)
-    parser.add_argument("--hallucination-threshold", type=float, default=DEFAULT_HALLUCINATION_THRESHOLD)
+    parser.add_argument("--n-clusters", type=int, default=None)
+    parser.add_argument("--top-k-eval", type=int, default=None)
+    parser.add_argument("--hallucination-threshold", type=float, default=None)
     parser.add_argument("--recursive", dest="recursive", action="store_true")
     parser.add_argument("--no-recursive", dest="recursive", action="store_false")
     parser.set_defaults(recursive=True)

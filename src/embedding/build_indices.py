@@ -6,11 +6,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
+from src.adaptive.parameter_resolver import (
+    AdaptiveContext,
+    build_adaptive_context,
+    resolve_query_search_config,
+    resolve_top_k,
+)
 from src.config import DEFAULT_METADATA_CSV, EMBEDDINGS_DIR, INDICES_DIR, ensure_project_dirs
 from src.data.metadata_schema import ensure_metadata_columns, load_metadata_frame
 from src.embedding.vector_models import EmbeddingModelWrapper, list_available_models
-from src.search.explainability import SEMANTIC_SCORE_WEIGHT, explain_frame
+from src.search.explainability import explain_frame
 from src.search.match_locator import locate_best_dense_match
 from src.search.text_source import (
     DEFAULT_TEXT_SOURCE,
@@ -20,6 +27,7 @@ from src.search.text_source import (
     text_source_suffix,
 )
 from src.utils.io_utils import load_json, save_json, save_numpy
+from src.utils.device import resolve_torch_device
 
 try:
     import faiss  # type: ignore
@@ -42,6 +50,7 @@ class DenseSearchEngine:
         model_alias: str,
         text_source: str = DEFAULT_TEXT_SOURCE,
         artifact_namespace: str | None = None,
+        adaptive_context: AdaptiveContext | None = None,
     ):
         self.model_alias = model_alias
         self.text_source = text_source
@@ -52,7 +61,9 @@ class DenseSearchEngine:
         self.index_path = INDICES_DIR / f"{self._artifact_stem}.faiss"
         self.index_summary_path = INDICES_DIR / f"{self._artifact_stem}_index_summary.json"
         self.wrapper = EmbeddingModelWrapper(model_alias)
+        self.device = resolve_torch_device()
         self._set_metadata(metadata)
+        self.adaptive_context = adaptive_context
         self.embeddings: np.ndarray | None = None
         self.index = None
 
@@ -68,6 +79,16 @@ class DenseSearchEngine:
         )
         self.metadata = frame
         self.document_texts = self.metadata["search_text"].astype(str).tolist()
+
+    def _ensure_adaptive_context(self) -> None:
+        if self.adaptive_context is None:
+            self.adaptive_context = build_adaptive_context(
+                self.metadata,
+                text_source=self.text_source,
+                embedding_model_alias=self.model_alias,
+                embeddings=self.embeddings,
+                artifact_namespace=self.artifact_namespace,
+            )
 
     def _artifact_alignment_status(
         self,
@@ -141,6 +162,7 @@ class DenseSearchEngine:
         return appended
 
     def _save_index_summary(self, document_count: int, index_saved: bool, build_mode: str) -> None:
+        self._ensure_adaptive_context()
         save_json(
             self.index_summary_path,
             {
@@ -154,6 +176,10 @@ class DenseSearchEngine:
                 "dimension": int(self.embeddings.shape[1]) if self.embeddings is not None else None,
                 "document_count": int(document_count),
                 "build_mode": build_mode,
+                "adaptive_profile": self.adaptive_context.profile.to_dict(),
+                "adaptive_search": self.adaptive_context.search.to_dict(),
+                "adaptive_cluster": self.adaptive_context.cluster.to_dict(),
+                "adaptive_visualization": self.adaptive_context.visualization.to_dict(),
             },
         )
 
@@ -220,7 +246,11 @@ class DenseSearchEngine:
                     self.embeddings = stored_embeddings
                     if faiss is not None and self.index_path.exists():
                         self.index = faiss.read_index(str(self.index_path))
-                    self._save_index_summary(document_count=len(self.metadata), index_saved=self.index is not None, build_mode="no_update")
+                    self._save_index_summary(
+                        document_count=len(self.metadata),
+                        index_saved=self.index is not None,
+                        build_mode="no_update",
+                    )
                     return
 
                 appended_metadata = self._append_candidates(stored_metadata)
@@ -268,6 +298,7 @@ class DenseSearchEngine:
         if self.embeddings is None or len(self.metadata) != len(self.embeddings):
             self.load()
         assert self.embeddings is not None
+        self._ensure_adaptive_context()
         if len(self.metadata) != len(self.embeddings):
             raise ValueError(
                 f"Embedding rows ({len(self.embeddings)}) do not match metadata rows ({len(self.metadata)}) "
@@ -275,8 +306,19 @@ class DenseSearchEngine:
             )
 
         query_embedding = self.encode_query(query)
-        semantic_raw_scores = self.embeddings @ query_embedding
+        if self.device.startswith("cuda"):
+            with torch.inference_mode():
+                emb_t = torch.from_numpy(self.embeddings).to(self.device, non_blocking=True)
+                query_t = torch.from_numpy(query_embedding).to(self.device, non_blocking=True)
+                semantic_raw_scores = torch.matmul(emb_t, query_t).detach().cpu().numpy()
+        else:
+            semantic_raw_scores = self.embeddings @ query_embedding
         semantic_normalized_scores = np.clip((semantic_raw_scores + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
+        query_config = resolve_query_search_config(
+            query,
+            self.adaptive_context,
+            dense_scores=semantic_normalized_scores,
+        )
 
         result_frame = self.metadata.copy()
         result_frame["semantic_raw_score"] = semantic_raw_scores
@@ -285,8 +327,9 @@ class DenseSearchEngine:
             result_frame,
             query,
             text_source=self.text_source,
-            semantic_scores=[score * SEMANTIC_SCORE_WEIGHT for score in semantic_normalized_scores],
+            semantic_scores=[score * query_config.dense_semantic_weight for score in semantic_normalized_scores],
             score_kind="cosine_similarity",
+            field_weights=query_config.field_weights,
         )
         result_frame["raw_score"] = result_frame["final_score"].astype(float)
         result_frame["normalized_score"] = _normalize_scores(result_frame["final_score"].to_numpy())
@@ -294,25 +337,32 @@ class DenseSearchEngine:
         result_frame["similarity_score"] = result_frame["display_score"]
         result_frame["search_source"] = self.text_source
         result_frame["score_kind"] = "weighted_lexical_semantic"
+        result_frame["adaptive_field_weights"] = str(query_config.field_weights)
+        result_frame["adaptive_keyword_alpha"] = query_config.keyword_alpha
+        result_frame["adaptive_dense_alpha"] = query_config.dense_alpha
+        result_frame["adaptive_semantic_weight"] = query_config.dense_semantic_weight
+        result_frame["adaptive_preview_length"] = query_config.preview_length
+        result_frame["adaptive_reason"] = query_config.reasoning
+        result_frame["inference_device"] = self.device
         result_frame["raw_score_explanation"] = (
-            "raw_score는 L2 정규화된 임베딩 간 내적이며 cosine similarity와 동일합니다. "
-            "display_score는 cosine similarity를 0~100 범위로 선형 변환한 값입니다."
-        )
-        result_frame["raw_score_explanation"] = (
-            "final_score = lexical_score + semantic_score. "
-            "lexical_score = title*5 + tags*4 + description*3 + transcript*2. "
-            f"semantic_score = cosine similarity normalized score*{SEMANTIC_SCORE_WEIGHT:.1f}."
+            f"field_weights={query_config.field_weights}; "
+            f"dense_semantic_weight={query_config.dense_semantic_weight:.3f}; "
+            f"keyword_alpha={query_config.keyword_alpha:.3f}; "
+            f"dense_alpha={query_config.dense_alpha:.3f}; "
+            "final_score = lexical_score + semantic_score with adaptive weighting."
         )
         result_frame["preview"] = result_frame.apply(
-            lambda row: build_preview_text(row, text_source=self.text_source),
+            lambda row: build_preview_text(row, text_source=self.text_source, length=query_config.preview_length),
             axis=1,
         )
         result_frame["transcript_preview"] = result_frame["preview"]
-        result_frame["original_preview"] = result_frame["original_transcript"].str.slice(0, 140) + "..."
-        result_frame["stt_preview"] = result_frame["stt_transcript"].str.slice(0, 140) + "..."
+        result_frame["original_preview"] = result_frame["original_transcript"].fillna("").astype(str).str.slice(0, query_config.preview_length) + "..."
+        result_frame["stt_preview"] = result_frame["stt_transcript"].fillna("").astype(str).str.slice(0, query_config.preview_length) + "..."
         return result_frame.sort_values("final_score", ascending=False).reset_index(drop=True)
 
-    def search(self, query: str, top_k: int = 10) -> pd.DataFrame:
+    def search(self, query: str, top_k: int | None = None) -> pd.DataFrame:
+        self._ensure_adaptive_context()
+        top_k = resolve_top_k(self.adaptive_context.profile, top_k)
         result_frame = self.score_all(query).head(top_k).reset_index(drop=True)
         match_details = result_frame["primary_text"].apply(
             lambda text: locate_best_dense_match(text, query, self.wrapper)
@@ -364,6 +414,12 @@ class DenseSearchEngine:
                 "preview",
                 "original_preview",
                 "stt_preview",
+                "adaptive_field_weights",
+                "adaptive_keyword_alpha",
+                "adaptive_dense_alpha",
+                "adaptive_semantic_weight",
+                "adaptive_preview_length",
+                "adaptive_reason",
             ]
         ]
 
@@ -428,9 +484,9 @@ def main() -> None:
         text_sources=args.text_sources,
         artifact_namespace=args.artifact_namespace,
     )
-    print("Built embedding artifacts for:")
     for alias, text_source in built:
-        print(f" - {alias} / {text_source}")
+        summary = load_index_summary(alias, text_source, artifact_namespace=args.artifact_namespace)
+        print(summary)
 
 
 if __name__ == "__main__":

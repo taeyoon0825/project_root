@@ -9,9 +9,15 @@ import pandas as pd
 from rank_bm25 import BM25Okapi
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from src.adaptive.parameter_resolver import (
+    AdaptiveContext,
+    build_adaptive_context,
+    resolve_query_search_config,
+    resolve_top_k,
+)
 from src.config import DEFAULT_METADATA_CSV, INDICES_DIR, ensure_project_dirs
 from src.data.metadata_schema import ensure_metadata_columns, load_metadata_frame
-from src.search.explainability import RANKER_SCORE_WEIGHT, explain_frame
+from src.search.explainability import explain_frame
 from src.search.match_locator import locate_best_keyword_match, simple_tokenize
 from src.search.text_source import (
     DEFAULT_TEXT_SOURCE,
@@ -39,11 +45,11 @@ def _score_metadata(method: str) -> tuple[str, str]:
     if normalized_method == "tfidf":
         return (
             "tfidf_dot",
-            "raw_score는 TF-IDF 문서 벡터와 질의 벡터의 내적 값이며, display_score는 현재 질의 기준 0~100 정규화 점수입니다.",
+            "raw_score is the TF-IDF dot product and display_score is query-relative 0~100 normalization.",
         )
     return (
         "bm25",
-        "raw_score는 BM25 점수이며, display_score는 현재 질의 기준 0~100 정규화 점수입니다.",
+        "raw_score is the BM25 score and display_score is query-relative 0~100 normalization.",
     )
 
 
@@ -55,8 +61,15 @@ def _artifact_prefix(artifact_namespace: str | None) -> str:
 
 
 class KeywordSearchEngine:
-    def __init__(self, metadata: pd.DataFrame, text_source: str = DEFAULT_TEXT_SOURCE):
+    def __init__(
+        self,
+        metadata: pd.DataFrame,
+        text_source: str = DEFAULT_TEXT_SOURCE,
+        adaptive_context: AdaptiveContext | None = None,
+        artifact_namespace: str | None = None,
+    ):
         self.text_source = text_source
+        self.artifact_namespace = artifact_namespace
         self.metadata = ensure_metadata_columns(metadata)
         self.metadata["primary_text"] = self.metadata.apply(
             lambda row: resolve_primary_text(row, text_source=self.text_source),
@@ -65,6 +78,11 @@ class KeywordSearchEngine:
         self.metadata["search_text"] = self.metadata.apply(
             lambda row: build_search_text(row, text_source=self.text_source),
             axis=1,
+        )
+        self.adaptive_context = adaptive_context or build_adaptive_context(
+            self.metadata,
+            text_source=self.text_source,
+            artifact_namespace=artifact_namespace,
         )
         self.corpus_texts = self.metadata["search_text"].tolist()
         self.tokenized_corpus = [simple_tokenize(text) for text in self.corpus_texts]
@@ -77,10 +95,18 @@ class KeywordSearchEngine:
         cls,
         metadata_path: Path = DEFAULT_METADATA_CSV,
         text_source: str = DEFAULT_TEXT_SOURCE,
+        adaptive_context: AdaptiveContext | None = None,
+        artifact_namespace: str | None = None,
     ) -> "KeywordSearchEngine":
-        return cls(load_metadata_frame(metadata_path), text_source=text_source)
+        return cls(
+            load_metadata_frame(metadata_path),
+            text_source=text_source,
+            adaptive_context=adaptive_context,
+            artifact_namespace=artifact_namespace,
+        )
 
-    def search(self, query: str, top_k: int = 10, method: str = "bm25") -> pd.DataFrame:
+    def search(self, query: str, top_k: int | None = None, method: str = "bm25") -> pd.DataFrame:
+        top_k = resolve_top_k(self.adaptive_context.profile, top_k)
         query_tokens = simple_tokenize(query)
         normalized_method = method.lower()
         if normalized_method == "tfidf":
@@ -91,14 +117,20 @@ class KeywordSearchEngine:
 
         results = self.metadata.copy()
         ranker_normalized_scores = _normalize_scores(scores)
+        query_config = resolve_query_search_config(
+            query,
+            self.adaptive_context,
+            keyword_scores=ranker_normalized_scores,
+        )
         results["search_source"] = self.text_source
         score_kind, raw_score_explanation = _score_metadata(method)
         results = explain_frame(
             results,
             query,
             text_source=self.text_source,
-            ranker_scores=[score * RANKER_SCORE_WEIGHT for score in ranker_normalized_scores],
+            ranker_scores=[score * query_config.keyword_ranker_weight for score in ranker_normalized_scores],
             score_kind=score_kind,
+            field_weights=query_config.field_weights,
         )
         results["ranker_raw_score"] = scores
         results["ranker_normalized_score"] = ranker_normalized_scores
@@ -107,16 +139,26 @@ class KeywordSearchEngine:
         results["display_score"] = results["normalized_score"].astype(float) * 100.0
         results["similarity_score"] = results["display_score"]
         results["score_kind"] = score_kind
+        results["adaptive_field_weights"] = str(query_config.field_weights)
+        results["adaptive_keyword_alpha"] = query_config.keyword_alpha
+        results["adaptive_dense_alpha"] = query_config.dense_alpha
+        results["adaptive_ranker_weight"] = query_config.keyword_ranker_weight
+        results["adaptive_preview_length"] = query_config.preview_length
+        results["adaptive_reason"] = query_config.reasoning
         results["raw_score_explanation"] = (
-            f"final_score = lexical_score + semantic_score. "
-            f"lexical_score = title*5 + tags*4 + description*3 + transcript*2 + "
-            f"{score_kind} normalized score*{RANKER_SCORE_WEIGHT:.1f}. "
+            f"field_weights={query_config.field_weights}; "
+            f"keyword_ranker_weight={query_config.keyword_ranker_weight:.3f}; "
+            f"keyword_alpha={query_config.keyword_alpha:.3f}; "
+            f"dense_alpha={query_config.dense_alpha:.3f}; "
             f"{raw_score_explanation}"
         )
-        results["preview"] = results.apply(lambda row: build_preview_text(row, text_source=self.text_source), axis=1)
+        results["preview"] = results.apply(
+            lambda row: build_preview_text(row, text_source=self.text_source, length=query_config.preview_length),
+            axis=1,
+        )
         results["transcript_preview"] = results["preview"]
-        results["original_preview"] = results["original_transcript"].str.slice(0, 140) + "..."
-        results["stt_preview"] = results["stt_transcript"].str.slice(0, 140) + "..."
+        results["original_preview"] = results["original_transcript"].fillna("").astype(str).str.slice(0, query_config.preview_length) + "..."
+        results["stt_preview"] = results["stt_transcript"].fillna("").astype(str).str.slice(0, query_config.preview_length) + "..."
         results = results.sort_values("final_score", ascending=False).head(top_k).reset_index(drop=True)
         match_details = results["primary_text"].apply(lambda text: locate_best_keyword_match(text, query, method=method))
         results = pd.concat([results, pd.DataFrame(match_details.tolist())], axis=1)
@@ -166,6 +208,12 @@ class KeywordSearchEngine:
                 "preview",
                 "original_preview",
                 "stt_preview",
+                "adaptive_field_weights",
+                "adaptive_keyword_alpha",
+                "adaptive_dense_alpha",
+                "adaptive_ranker_weight",
+                "adaptive_preview_length",
+                "adaptive_reason",
             ]
         ]
 
@@ -182,6 +230,8 @@ class KeywordSearchEngine:
             "document_count": len(self.metadata),
             "columns": self.metadata.columns.tolist(),
             "artifact_namespace": artifact_namespace,
+            "adaptive_profile": self.adaptive_context.profile.to_dict(),
+            "adaptive_search": self.adaptive_context.search.to_dict(),
         }
         output_path = output_path or INDICES_DIR / f"{_artifact_prefix(artifact_namespace)}keyword_index_metadata__{suffix}.json"
         save_json(output_path, payload)
@@ -202,7 +252,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build and smoke-test keyword search.")
     parser.add_argument("--metadata-path", type=Path, default=DEFAULT_METADATA_CSV)
     parser.add_argument("--query", type=str, default="youtube interview transcript")
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--method", type=str, default="bm25", choices=["bm25", "tfidf"])
     parser.add_argument("--artifact-namespace", type=str, default=None)
     parser.add_argument(
@@ -213,7 +263,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    engine = KeywordSearchEngine.from_csv(args.metadata_path, text_source=args.text_source)
+    engine = KeywordSearchEngine.from_csv(
+        args.metadata_path,
+        text_source=args.text_source,
+        artifact_namespace=args.artifact_namespace,
+    )
     output_path = engine.export_index_metadata(artifact_namespace=args.artifact_namespace)
     print(f"Keyword index metadata saved to {output_path}")
     print(engine.search(args.query, top_k=args.top_k, method=args.method).to_string(index=False))

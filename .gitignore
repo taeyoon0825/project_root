@@ -40,7 +40,12 @@ Desktop.ini
 *.csv
 
 # Local project data / generated artifacts
-data/
+data/db/**
+!data/db/
+!data/db/raw/
+!data/db/stt_csv/
+!data/db/json/
+!data/db/**/.gitkeep
 artifacts/
 
 # Large model / index / binary artifacts

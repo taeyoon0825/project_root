@@ -7,8 +7,6 @@ import pandas as pd
 
 SUPPORTED_TEXT_SOURCES = ("stt_transcript", "original_transcript", "combined")
 DEFAULT_TEXT_SOURCE = "stt_transcript"
-LOGICAL_LINE_MAX_CHARS = 180
-LOGICAL_LINE_MAX_SENTENCES = 3
 
 
 def validate_text_source(text_source: str) -> str:
@@ -55,9 +53,22 @@ def build_search_text(row: pd.Series, text_source: str = DEFAULT_TEXT_SOURCE) ->
     ).strip()
 
 
-def build_preview_text(row: pd.Series, text_source: str = DEFAULT_TEXT_SOURCE, length: int = 180) -> str:
+def _adaptive_preview_length(text: str, requested_length: int | None = None) -> int:
+    if requested_length is not None:
+        return max(40, int(requested_length))
+    normalized = normalize_text_for_search(text)
+    if not normalized:
+        return 80
+    sentence_lengths = [len(part) for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+    avg_sentence = sum(sentence_lengths) / max(1, len(sentence_lengths)) if sentence_lengths else len(normalized)
+    target = 90 + (0.35 * min(avg_sentence, 160))
+    return int(max(80, min(220, round(target))))
+
+
+def build_preview_text(row: pd.Series, text_source: str = DEFAULT_TEXT_SOURCE, length: int | None = None) -> str:
     preview = resolve_primary_text(row, text_source=text_source)
-    return preview[:length] + ("..." if len(preview) > length else "")
+    resolved_length = _adaptive_preview_length(preview, requested_length=length)
+    return preview[:resolved_length] + ("..." if len(preview) > resolved_length else "")
 
 
 def split_line_into_sentences(text: str) -> list[str]:
@@ -69,14 +80,20 @@ def split_line_into_sentences(text: str) -> list[str]:
     return sentences or [normalized]
 
 
-def _chunk_sentences_into_logical_lines(
-    sentences: list[str],
-    max_chars: int = LOGICAL_LINE_MAX_CHARS,
-    max_sentences: int = LOGICAL_LINE_MAX_SENTENCES,
-) -> list[str]:
+def _logical_line_limits(sentences: list[str]) -> tuple[int, int]:
+    if not sentences:
+        return 120, 2
+    avg_sentence = sum(len(sentence) for sentence in sentences) / max(1, len(sentences))
+    max_chars = int(max(120, min(260, round(avg_sentence * 2.2))))
+    max_sentences = 2 if avg_sentence > 90 else 3 if avg_sentence > 45 else 4
+    return max_chars, max_sentences
+
+
+def _chunk_sentences_into_logical_lines(sentences: list[str]) -> list[str]:
     if not sentences:
         return []
 
+    max_chars, max_sentences = _logical_line_limits(sentences)
     chunks: list[str] = []
     current_sentences: list[str] = []
     current_length = 0

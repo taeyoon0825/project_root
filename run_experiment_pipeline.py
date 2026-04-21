@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from src.adaptive.parameter_resolver import build_adaptive_context
 from src.config import DEFAULT_METADATA_CSV, ensure_project_dirs
 from src.data.metadata_schema import load_metadata_frame
 from src.data.generate_dataset import generate_dataset
@@ -15,34 +16,41 @@ from src.visualize.pca_plot import build_projection_artifacts
 def run_pipeline(
     total_items: int = 100,
     include_optional: bool = False,
-    n_clusters: int = 6,
+    n_clusters: int | None = None,
     text_sources: tuple[str, ...] = ("stt_transcript", "original_transcript"),
 ) -> None:
     ensure_project_dirs()
 
-    print("[1/6] Data Generation")
+    print("[1/6] Data generation")
     metadata = generate_dataset(total_items=total_items)
 
-    print("[2/6] Keyword Indexing")
+    print("[2/6] Keyword indexing")
     for text_source in text_sources:
-        keyword_engine = KeywordSearchEngine(metadata, text_source=text_source)
+        adaptive_context = build_adaptive_context(metadata, text_source=text_source)
+        keyword_engine = KeywordSearchEngine(metadata, text_source=text_source, adaptive_context=adaptive_context)
         keyword_engine.export_index_metadata()
 
-    print("[3/6] Dense Embedding / Vector Indexing")
+    print("[3/6] Dense embedding / vector indexing")
     built_models = build_all_indices(
         DEFAULT_METADATA_CSV,
         include_optional=include_optional,
         text_sources=text_sources,
     )
 
-    print("[4/6] Dimensionality Reduction")
+    print("[4/6] Dimensionality reduction")
     metadata = load_metadata_frame(DEFAULT_METADATA_CSV)
     for model_alias, text_source in built_models:
         build_projection_artifacts(metadata, model_alias, text_source=text_source)
 
     print("[5/6] Clustering")
     for model_alias, text_source in built_models:
-        cluster_embeddings(metadata, model_alias, method="kmeans", n_clusters=n_clusters, text_source=text_source)
+        cluster_embeddings(
+            metadata,
+            model_alias,
+            method="kmeans",
+            n_clusters=n_clusters,
+            text_source=text_source,
+        )
         if include_optional:
             try:
                 cluster_embeddings(
@@ -56,7 +64,11 @@ def run_pipeline(
                 print(f"Skipping HDBSCAN for {model_alias} / {text_source}: {exc}")
 
     print("[6/6] Evaluation")
-    evaluate_all(DEFAULT_METADATA_CSV, text_sources=text_sources, include_optional=include_optional)
+    evaluate_all(
+        DEFAULT_METADATA_CSV,
+        text_sources=text_sources,
+        include_optional=include_optional,
+    )
 
     print("Pipeline completed.")
 
@@ -65,7 +77,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the full experiment pipeline.")
     parser.add_argument("--total-items", type=int, default=100)
     parser.add_argument("--include-optional", action="store_true")
-    parser.add_argument("--n-clusters", type=int, default=6)
+    parser.add_argument("--n-clusters", type=int, default=None)
     parser.add_argument(
         "--text-sources",
         nargs="+",

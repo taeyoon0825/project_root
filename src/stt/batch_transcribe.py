@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
-from src.config import AUDIO_STT_DIR, DEFAULT_METADATA_CSV, WHISPER_CACHE_DIR, ensure_project_dirs
+from src.adaptive.parameter_resolver import build_adaptive_context
+import pandas as pd
+
+from src.config import AUDIO_STT_DIR, DEFAULT_METADATA_CSV, STT_CSV_DIR, WHISPER_CACHE_DIR, ensure_project_dirs
 from src.data.metadata_schema import load_metadata_frame, save_metadata_frame
+from src.utils.device import resolve_stt_device
 from src.utils.io_utils import save_json
 
 try:
     import whisper
 except ImportError:  # pragma: no cover
     whisper = None
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None
 
 
 def _safe_stem(value: str) -> str:
@@ -62,10 +71,35 @@ def _segments_output_path(stt_txt_path: Path) -> Path:
     return stt_txt_path.with_suffix(".segments.json")
 
 
+def _stt_csv_output_path(stt_txt_path: Path) -> Path:
+    return STT_CSV_DIR / f"{stt_txt_path.stem}.csv"
+
+
+def _write_stt_csv(stt_txt_path: Path, transcript: str, language: str | None, segments: list[dict] | None) -> Path:
+    STT_CSV_DIR.mkdir(parents=True, exist_ok=True)
+    csv_path = _stt_csv_output_path(stt_txt_path)
+    rows = []
+    if segments:
+        for index, segment in enumerate(segments, start=1):
+            rows.append(
+                {
+                    "segment_index": index,
+                    "start": float(segment.get("start", 0.0) or 0.0),
+                    "end": float(segment.get("end", 0.0) or 0.0),
+                    "text": str(segment.get("text", "") or "").strip(),
+                    "language": str(language or ""),
+                }
+            )
+    if not rows:
+        rows = [{"segment_index": 1, "start": 0.0, "end": 0.0, "text": str(transcript or ""), "language": str(language or "")}]
+    pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return csv_path
+
+
 def transcribe_audio_batch(
     metadata_path: Path = DEFAULT_METADATA_CSV,
-    model_name: str = "base",
-    language: str | None = "ko",
+    model_name: str | None = None,
+    language: str | None = None,
     overwrite: bool = False,
     source_type: str | None = None,
     skip_errors: bool = True,
@@ -90,8 +124,18 @@ def transcribe_audio_batch(
         _safe_print("[STT] No target files selected. STT skipped.")
         return metadata_path
 
-    model = whisper.load_model(model_name, download_root=str(WHISPER_CACHE_DIR))
+    subset = metadata.iloc[candidate_indices].reset_index(drop=True)
+    adaptive_context = build_adaptive_context(subset, text_source="stt_transcript")
+    resolved_model_name = str(model_name or adaptive_context.language.whisper_model or "base").strip() or "base"
     whisper_language = _normalize_language(language)
+    if whisper_language is None:
+        whisper_language = adaptive_context.language.whisper_language
+
+    device = resolve_stt_device()
+    _safe_print(f"[STT] dedicated device={device}")
+    model = whisper.load_model(resolved_model_name, download_root=str(WHISPER_CACHE_DIR), device=device)
+    if not str(device).startswith("cuda"):
+        raise RuntimeError(f"STT requires CUDA-only execution, but resolved device={device!r}.")
     total = len(candidate_indices)
 
     for progress_index, row_index in enumerate(candidate_indices, start=1):
@@ -116,7 +160,7 @@ def transcribe_audio_batch(
                 result = model.transcribe(
                     str(audio_path),
                     language=whisper_language,
-                    fp16=False,
+                    fp16=device.startswith("cuda"),
                     condition_on_previous_text=False,
                     verbose=False,
                 )
@@ -129,6 +173,12 @@ def transcribe_audio_batch(
                         "language": result.get("language"),
                         "segments": result.get("segments", []),
                     },
+                )
+                stt_csv_path = _write_stt_csv(
+                    stt_txt_path,
+                    transcript=transcript,
+                    language=str(result.get("language") or whisper_language or ""),
+                    segments=result.get("segments", []),
                 )
                 _safe_print(f"  - transcribed to {stt_txt_path}")
             else:
@@ -143,11 +193,30 @@ def transcribe_audio_batch(
                             "segments": [],
                         },
                     )
+                result = {"language": whisper_language, "segments": []}
+                try:
+                    payload = segments_path.read_text(encoding="utf-8")
+                    parsed = json.loads(payload)
+                    if isinstance(parsed, dict):
+                        result["segments"] = parsed.get("segments", []) or []
+                except Exception:
+                    result["segments"] = []
+                stt_csv_path = _write_stt_csv(
+                    stt_txt_path,
+                    transcript=transcript,
+                    language=str(result.get("language") or whisper_language or ""),
+                    segments=result.get("segments", []),
+                )
                 _safe_print(f"  - reused existing transcript {stt_txt_path}")
 
             metadata.at[row_index, "stt_transcript"] = transcript
             metadata.at[row_index, "stt_txt_path"] = str(stt_txt_path.resolve())
-            metadata.at[row_index, "stt_model_name"] = model_name
+            metadata.at[row_index, "stt_csv_path"] = str(stt_csv_path.resolve())
+            metadata.at[row_index, "stt_model_name"] = resolved_model_name
+            metadata.at[row_index, "stt_device"] = device
+            metadata.at[row_index, "stt_language"] = str(result.get("language") or whisper_language or "")
+            metadata.at[row_index, "adaptive_whisper_language"] = whisper_language or ""
+            metadata.at[row_index, "adaptive_language_reason"] = adaptive_context.language.reasoning
             metadata.at[row_index, "error_message"] = ""
 
             if row_source_type in {"youtube_mp4", "youtube_wav"}:
@@ -162,6 +231,12 @@ def transcribe_audio_batch(
                 _safe_print(f"  - failed: {exc}")
                 continue
             raise
+        finally:
+            if torch is not None and device.startswith("cuda"):
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
     save_metadata_frame(metadata, metadata_path)
     return metadata_path
@@ -170,8 +245,8 @@ def transcribe_audio_batch(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Transcribe audio files with Whisper.")
     parser.add_argument("--metadata-path", type=Path, default=DEFAULT_METADATA_CSV)
-    parser.add_argument("--model-name", type=str, default="base")
-    parser.add_argument("--language", type=str, default="ko")
+    parser.add_argument("--model-name", type=str, default=None)
+    parser.add_argument("--language", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--source-type", type=str, default=None)
     parser.add_argument("--skip-errors", dest="skip_errors", action="store_true")

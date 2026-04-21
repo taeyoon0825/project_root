@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from src.adaptive.parameter_resolver import build_adaptive_context
 from src.audio.audio_utils import convert_media_to_wav
 from src.config import REALDATA_METADATA_CSV, ensure_project_dirs
 from src.data.metadata_schema import load_metadata_frame, save_metadata_frame
@@ -11,18 +12,25 @@ from src.data.metadata_schema import load_metadata_frame, save_metadata_frame
 def extract_audio_from_metadata(
     metadata_path: Path = REALDATA_METADATA_CSV,
     source_type: str | None = "youtube_mp4",
-    sample_rate: int = 16000,
+    sample_rate: int | None = None,
     overwrite: bool = False,
     skip_errors: bool = True,
     target_ids: set[str] | None = None,
 ) -> Path:
     ensure_project_dirs()
     metadata = load_metadata_frame(metadata_path)
-    total_targets = (
-        metadata["id"].astype(str).isin(target_ids).sum()
-        if target_ids
-        else len(metadata)
-    )
+    candidate_mask = metadata.index.to_series().map(lambda _: True)
+    if source_type:
+        candidate_mask = metadata["source_type"].fillna("").astype(str).eq(source_type) | (
+            metadata["source_type"].fillna("").astype(str).eq("youtube_wav") & (source_type == "youtube_mp4")
+        )
+    if target_ids:
+        candidate_mask &= metadata["id"].fillna("").astype(str).isin(target_ids)
+    subset = metadata.loc[candidate_mask].reset_index(drop=True)
+    adaptive_context = build_adaptive_context(subset if not subset.empty else metadata, text_source="stt_transcript")
+    resolved_sample_rate = sample_rate if sample_rate is not None else adaptive_context.language.sample_rate
+
+    total_targets = metadata["id"].astype(str).isin(target_ids).sum() if target_ids else int(candidate_mask.sum())
     current_index = 0
 
     for row_index, row in metadata.iterrows():
@@ -35,10 +43,10 @@ def extract_audio_from_metadata(
 
         current_index += 1
         input_path = Path(str(row["file_path"]))
-        output_value = str(row["audio_path"] or row["audio_file_path"]).strip()
+        output_value = str(row.get("audio_path") or row.get("audio_file_path") or "").strip()
         output_path = Path(output_value) if output_value else input_path.with_suffix(".wav")
 
-        print(f"[audio {current_index}/{total_targets}] {input_path.name}")
+        print(f"[audio {current_index}/{max(1, total_targets)}] {input_path.name}")
         if not input_path.exists():
             message = f"Input media file does not exist: {input_path}"
             metadata.at[row_index, "processing_status"] = "audio_missing"
@@ -56,7 +64,7 @@ def extract_audio_from_metadata(
                 convert_media_to_wav(
                     input_path=input_path,
                     output_path=output_path,
-                    sample_rate=sample_rate,
+                    sample_rate=resolved_sample_rate,
                     overwrite=True,
                 )
                 print(f"  - extracted to {output_path}")
@@ -66,6 +74,8 @@ def extract_audio_from_metadata(
             metadata.at[row_index, "audio_path"] = str(output_path.resolve())
             metadata.at[row_index, "audio_file_path"] = str(output_path.resolve())
             metadata.at[row_index, "audio_file_name"] = output_path.name
+            metadata.at[row_index, "audio_sample_rate_target"] = resolved_sample_rate or ""
+            metadata.at[row_index, "adaptive_language_reason"] = adaptive_context.language.reasoning
             metadata.at[row_index, "processing_status"] = "audio_extracted"
             metadata.at[row_index, "error_message"] = ""
         except Exception as exc:
@@ -84,7 +94,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Extract WAV audio from discovered youtube mp4 files.")
     parser.add_argument("--metadata-path", type=Path, default=REALDATA_METADATA_CSV)
     parser.add_argument("--source-type", type=str, default="youtube_mp4")
-    parser.add_argument("--sample-rate", type=int, default=16000)
+    parser.add_argument("--sample-rate", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-errors", dest="skip_errors", action="store_true")
     parser.add_argument("--no-skip-errors", dest="skip_errors", action="store_false")
@@ -103,4 +113,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

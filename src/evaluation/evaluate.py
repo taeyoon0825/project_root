@@ -4,9 +4,17 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
+from src.adaptive.parameter_resolver import (
+    AdaptiveContext,
+    build_adaptive_context,
+    build_static_reference_context,
+    resolve_metric_config,
+    resolve_top_k,
+)
 from src.config import DEFAULT_METADATA_CSV, DEFAULT_QUERYSET_CSV, EVALUATION_DIR, ensure_project_dirs
 from src.data.metadata_schema import load_metadata_frame
 from src.embedding.build_indices import DenseSearchEngine
@@ -16,7 +24,7 @@ from src.evaluation.ground_truth import (
     evaluation_definition_text,
     normalize_ground_truth_queryset,
 )
-from src.evaluation.hallucination import DEFAULT_HALLUCINATION_THRESHOLD, detect_retrieval_hallucination
+from src.evaluation.hallucination import detect_retrieval_hallucination
 from src.evaluation.metrics import aggregate_metric_rows, evaluate_ranked_results
 from src.evaluation.reporting import (
     build_model_weight_frame,
@@ -25,6 +33,7 @@ from src.evaluation.reporting import (
     format_query_console_report,
     format_summary_console_report,
 )
+from src.retrieval.fused_search import FusedSearchEngine
 from src.search.keyword_search import KeywordSearchEngine
 from src.search.text_source import DEFAULT_TEXT_SOURCE
 from src.utils.io_utils import save_dataframe, save_json
@@ -44,10 +53,21 @@ def _console_print(message: str) -> None:
     print(safe_message)
 
 
+def _profile_summary(context: AdaptiveContext) -> str:
+    profile = context.profile
+    return (
+        f"docs={profile.document_count}, categories={profile.category_count}, "
+        f"lang={profile.dominant_language}, avg_doc_len={profile.avg_document_length:.1f}, "
+        f"exact_match={profile.exact_match_ratio:.3f}, semantic_need={profile.semantic_need_score:.3f}, "
+        f"stt_quality={profile.stt_quality_score:.3f}"
+    )
+
+
 def _detail_columns() -> list[str]:
     return [
         "system_name",
         "system_type",
+        "parameter_mode",
         "text_source",
         "score_kind",
         "query_id",
@@ -68,6 +88,8 @@ def _detail_columns() -> list[str]:
         "recall_at_k",
         "accuracy_at_1",
         "f1_at_k",
+        "mrr_at_k",
+        "ndcg_at_k",
         "soft_precision_at_k",
         "soft_recall_at_k",
         "soft_accuracy_at_1",
@@ -107,8 +129,16 @@ def _detail_columns() -> list[str]:
         "hallucination",
         "hallucination_flag",
         "hallucination_reason",
+        "hallucination_threshold_used",
         "soft_score_reason",
         "raw_score_explanation",
+        "adaptive_field_weights",
+        "adaptive_keyword_alpha",
+        "adaptive_dense_alpha",
+        "adaptive_reason",
+        "adaptive_search_reason",
+        "adaptive_metric_reason",
+        "dataset_profile_summary",
     ]
 
 
@@ -116,6 +146,7 @@ def _summary_columns(top_k: int) -> list[str]:
     return [
         "system_name",
         "system_type",
+        "parameter_mode",
         "text_source",
         "score_kind",
         "evaluation_definition",
@@ -126,6 +157,8 @@ def _summary_columns(top_k: int) -> list[str]:
         "recall_at_k",
         "accuracy_at_1",
         "f1_at_k",
+        "mrr_at_k",
+        "ndcg_at_k",
         "soft_precision_at_k",
         "soft_recall_at_k",
         "soft_accuracy_at_1",
@@ -140,6 +173,10 @@ def _summary_columns(top_k: int) -> list[str]:
         f"top{top_k}_accuracy",
         "segment_exact_hit_rate",
         "segment_partial_hit_rate",
+        "mean_hallucination_threshold",
+        "dataset_profile_summary",
+        "search_parameter_reasoning",
+        "metric_parameter_reasoning",
         "score_definition",
     ]
 
@@ -149,14 +186,22 @@ def _empty_eval_outputs(artifact_namespace: str | None = None, top_k: int = 3) -
     summary = pd.DataFrame(columns=_summary_columns(top_k))
     comparison = pd.DataFrame()
     ground_truth = pd.DataFrame()
+    mode_comparison = pd.DataFrame()
 
     save_dataframe(evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace), detail)
     save_dataframe(evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace), summary)
     save_dataframe(evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace), comparison)
+    save_dataframe(evaluation_artifact_path("retrieval_eval_mode_comparison.csv", artifact_namespace), mode_comparison)
     save_dataframe(evaluation_artifact_path("ground_truth_mapping.csv", artifact_namespace), ground_truth)
     save_json(evaluation_artifact_path("retrieval_eval_summary.json", artifact_namespace), [])
     save_json(evaluation_artifact_path("ground_truth_mapping.json", artifact_namespace), [])
-    return {"detail": detail, "summary": summary, "comparison": comparison, "ground_truth": ground_truth}
+    return {
+        "detail": detail,
+        "summary": summary,
+        "comparison": comparison,
+        "mode_comparison": mode_comparison,
+        "ground_truth": ground_truth,
+    }
 
 
 def _build_source_comparison(summary: pd.DataFrame) -> pd.DataFrame:
@@ -166,11 +211,14 @@ def _build_source_comparison(summary: pd.DataFrame) -> pd.DataFrame:
         [
             "system_name",
             "system_type",
+            "parameter_mode",
             "text_source",
             "precision_at_k",
             "recall_at_k",
             "accuracy_at_1",
             "f1_at_k",
+            "mrr_at_k",
+            "ndcg_at_k",
             "soft_precision_at_k",
             "soft_recall_at_k",
             "soft_accuracy_at_1",
@@ -182,13 +230,15 @@ def _build_source_comparison(summary: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
     pivot = base.pivot_table(
-        index=["system_name", "system_type"],
+        index=["system_name", "system_type", "parameter_mode"],
         columns="text_source",
         values=[
             "precision_at_k",
             "recall_at_k",
             "accuracy_at_1",
             "f1_at_k",
+            "mrr_at_k",
+            "ndcg_at_k",
             "soft_precision_at_k",
             "soft_recall_at_k",
             "soft_accuracy_at_1",
@@ -208,16 +258,20 @@ def _summary_row(
     *,
     system_name: str,
     system_type: str,
+    parameter_mode: str,
     text_source: str,
     score_kind: str,
     definition_text: str,
     top_k: int,
+    context: AdaptiveContext,
 ) -> dict:
     summary = aggregate_metric_rows(detail, top_k=top_k)
     score_definition = detail["raw_score_explanation"].dropna().astype(str).iloc[0] if not detail.empty else ""
+    metric_reason = detail["adaptive_metric_reason"].dropna().astype(str).iloc[0] if not detail.empty else ""
     return {
         "system_name": system_name,
         "system_type": system_type,
+        "parameter_mode": parameter_mode,
         "text_source": text_source,
         "score_kind": score_kind,
         "evaluation_definition": definition_text,
@@ -228,6 +282,8 @@ def _summary_row(
         "recall_at_k": summary["macro_recall_at_k"],
         "accuracy_at_1": summary["macro_accuracy_at_1"],
         "f1_at_k": summary["macro_f1_at_k"],
+        "mrr_at_k": summary["macro_mrr_at_k"],
+        "ndcg_at_k": summary["macro_ndcg_at_k"],
         "soft_precision_at_k": summary["macro_soft_precision_at_k"],
         "soft_recall_at_k": summary["macro_soft_recall_at_k"],
         "soft_accuracy_at_1": summary["macro_soft_accuracy_at_1"],
@@ -242,6 +298,10 @@ def _summary_row(
         f"top{top_k}_accuracy": summary[f"top{top_k}_accuracy"],
         "segment_exact_hit_rate": summary["segment_exact_hit_rate"],
         "segment_partial_hit_rate": summary["segment_partial_hit_rate"],
+        "mean_hallucination_threshold": summary["mean_hallucination_threshold"],
+        "dataset_profile_summary": _profile_summary(context),
+        "search_parameter_reasoning": context.search.reasoning,
+        "metric_parameter_reasoning": metric_reason or context.metric.reasoning,
         "score_definition": score_definition,
     }
 
@@ -250,36 +310,52 @@ def _evaluate_system(
     *,
     system_name: str,
     system_type: str,
+    parameter_mode: str,
     score_kind: str,
     queryset: pd.DataFrame,
-    search_fn,
+    search_fn: Callable[[str, int], pd.DataFrame],
     top_k: int,
-    hallucination_threshold: float,
+    hallucination_threshold: float | None,
     text_source: str,
+    context: AdaptiveContext,
 ) -> tuple[pd.DataFrame, dict]:
     rows = []
     definition_text = evaluation_definition_text(queryset)
 
     for _, query_row in queryset.iterrows():
-        results = search_fn(str(query_row["query"]))
-        metrics = evaluate_ranked_results(results, query_row, top_k=top_k)
+        results = search_fn(str(query_row["query"]), top_k)
+        row_metric_config = resolve_metric_config(
+            context.profile,
+            score_values=results["display_score"].astype(float).tolist() if "display_score" in results.columns else None,
+        )
+        metrics = evaluate_ranked_results(
+            results,
+            query_row,
+            top_k=top_k,
+            metric_config=row_metric_config,
+        )
         hallucination = detect_retrieval_hallucination(
             results,
             query_row,
             top_k=top_k,
             threshold=hallucination_threshold,
+            metric_config=row_metric_config,
         )
         rows.append(
             {
                 "system_name": system_name,
                 "system_type": system_type,
+                "parameter_mode": parameter_mode,
                 "text_source": text_source,
                 "score_kind": score_kind,
                 "query_id": query_row["query_id"],
                 "query": query_row["query"],
-                "query_preview": query_row["query_preview"],
+                "query_preview": query_row.get("query_preview", ""),
                 **metrics,
                 **hallucination,
+                "adaptive_search_reason": context.search.reasoning,
+                "adaptive_metric_reason": row_metric_config.reasoning,
+                "dataset_profile_summary": _profile_summary(context),
             }
         )
 
@@ -288,10 +364,12 @@ def _evaluate_system(
         detail,
         system_name=system_name,
         system_type=system_type,
+        parameter_mode=parameter_mode,
         text_source=text_source,
         score_kind=score_kind,
         definition_text=definition_text,
         top_k=top_k,
+        context=context,
     )
     return detail, summary
 
@@ -302,19 +380,27 @@ def evaluate_keyword_engine(
     method: str,
     text_source: str,
     top_k: int,
-    hallucination_threshold: float,
+    hallucination_threshold: float | None,
+    adaptive_context: AdaptiveContext,
+    parameter_mode: str,
 ) -> tuple[pd.DataFrame, dict]:
-    engine = KeywordSearchEngine(metadata, text_source=text_source)
+    engine = KeywordSearchEngine(
+        metadata,
+        text_source=text_source,
+        adaptive_context=adaptive_context,
+    )
     score_kind = "tfidf_dot" if method.lower() == "tfidf" else "bm25"
     return _evaluate_system(
         system_name=f"keyword-{method}",
         system_type="keyword",
+        parameter_mode=parameter_mode,
         score_kind=score_kind,
         queryset=queryset,
-        search_fn=lambda query: engine.search(query, top_k=top_k, method=method),
+        search_fn=lambda query, resolved_top_k: engine.search(query, top_k=resolved_top_k, method=method),
         top_k=top_k,
         hallucination_threshold=hallucination_threshold,
         text_source=text_source,
+        context=adaptive_context,
     )
 
 
@@ -324,42 +410,84 @@ def evaluate_dense_engine(
     model_alias: str,
     text_source: str,
     top_k: int,
-    hallucination_threshold: float,
+    hallucination_threshold: float | None,
+    adaptive_context: AdaptiveContext,
+    parameter_mode: str,
     artifact_namespace: str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    engine = DenseSearchEngine(metadata, model_alias, text_source=text_source, artifact_namespace=artifact_namespace)
+    engine = DenseSearchEngine(
+        metadata,
+        model_alias,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+        adaptive_context=adaptive_context,
+    )
     engine.load()
     return _evaluate_system(
         system_name=model_alias,
         system_type="dense",
+        parameter_mode=parameter_mode,
         score_kind="cosine_similarity",
         queryset=queryset,
-        search_fn=lambda query: engine.search(query, top_k=top_k),
+        search_fn=lambda query, resolved_top_k: engine.search(query, top_k=resolved_top_k),
         top_k=top_k,
         hallucination_threshold=hallucination_threshold,
         text_source=text_source,
+        context=adaptive_context,
+    )
+
+
+def evaluate_fused_engine(
+    queryset: pd.DataFrame,
+    metadata: pd.DataFrame,
+    text_source: str,
+    top_k: int,
+    hallucination_threshold: float | None,
+    adaptive_context: AdaptiveContext,
+    parameter_mode: str,
+    artifact_namespace: str | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    engine = FusedSearchEngine(
+        metadata,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+        adaptive_context=adaptive_context,
+    )
+    return _evaluate_system(
+        system_name="fused-retrieval",
+        system_type="fused",
+        parameter_mode=parameter_mode,
+        score_kind="fused_weighted_score",
+        queryset=queryset,
+        search_fn=lambda query, resolved_top_k: engine.search(query, top_k=resolved_top_k, keyword_method="bm25"),
+        top_k=top_k,
+        hallucination_threshold=hallucination_threshold,
+        text_source=text_source,
+        context=adaptive_context,
     )
 
 
 def evaluate_all(
     metadata_path: Path = DEFAULT_METADATA_CSV,
     queryset_path: Path = DEFAULT_QUERYSET_CSV,
-    text_sources: tuple[str, ...] = ("stt_transcript", "original_transcript"),
+    text_sources: tuple[str, ...] = (DEFAULT_TEXT_SOURCE, "original_transcript"),
     include_optional: bool = False,
     artifact_namespace: str | None = None,
     metadata: pd.DataFrame | None = None,
     queryset: pd.DataFrame | None = None,
-    top_k: int = 3,
-    hallucination_threshold: float = DEFAULT_HALLUCINATION_THRESHOLD,
+    top_k: int | None = None,
+    hallucination_threshold: float | None = None,
     print_report: bool = False,
     show_weights: bool = False,
+    include_static_reference: bool = True,
 ) -> dict[str, pd.DataFrame]:
     ensure_project_dirs()
     metadata = metadata.copy() if metadata is not None else load_metadata_frame(metadata_path)
     raw_queryset = queryset.copy() if queryset is not None else pd.read_csv(queryset_path) if queryset_path.exists() else pd.DataFrame()
 
+    fallback_top_k = top_k if top_k is not None else 3
     if metadata.empty:
-        return _empty_eval_outputs(artifact_namespace, top_k=top_k)
+        return _empty_eval_outputs(artifact_namespace, top_k=fallback_top_k)
 
     if raw_queryset.empty:
         raw_queryset = build_incremental_probe_queryset(metadata, set(metadata["id"].fillna("").astype(str)))
@@ -370,7 +498,7 @@ def evaluate_all(
         raw_queryset = build_incremental_probe_queryset(metadata, set(metadata["id"].fillna("").astype(str)))
         ground_truth = normalize_ground_truth_queryset(raw_queryset, metadata).reset_index(drop=True)
     if ground_truth.empty:
-        return _empty_eval_outputs(artifact_namespace, top_k=top_k)
+        return _empty_eval_outputs(artifact_namespace, top_k=fallback_top_k)
 
     save_dataframe(evaluation_artifact_path("ground_truth_mapping.csv", artifact_namespace), ground_truth)
     save_json(
@@ -378,17 +506,28 @@ def evaluate_all(
         ground_truth.to_dict(orient="records"),
     )
 
-    detail_frames = []
-    summary_rows = []
+    detail_frames: list[pd.DataFrame] = []
+    summary_rows: list[dict] = []
+    model_aliases = list(list_available_models(include_optional=include_optional).keys())
 
     for text_source in text_sources:
+        adaptive_context = build_adaptive_context(
+            metadata,
+            ground_truth,
+            text_source=text_source,
+            artifact_namespace=artifact_namespace,
+        )
+        adaptive_top_k = resolve_top_k(adaptive_context.profile, top_k)
+
         keyword_bm25_detail, keyword_bm25_summary = evaluate_keyword_engine(
             queryset=ground_truth,
             metadata=metadata,
             method="bm25",
             text_source=text_source,
-            top_k=top_k,
+            top_k=adaptive_top_k,
             hallucination_threshold=hallucination_threshold,
+            adaptive_context=adaptive_context,
+            parameter_mode="adaptive",
         )
         detail_frames.append(keyword_bm25_detail)
         summary_rows.append(keyword_bm25_summary)
@@ -398,32 +537,132 @@ def evaluate_all(
             metadata=metadata,
             method="tfidf",
             text_source=text_source,
-            top_k=top_k,
+            top_k=adaptive_top_k,
             hallucination_threshold=hallucination_threshold,
+            adaptive_context=adaptive_context,
+            parameter_mode="adaptive",
         )
         detail_frames.append(keyword_tfidf_detail)
         summary_rows.append(keyword_tfidf_summary)
 
-        for model_alias in list(list_available_models(include_optional=include_optional).keys()):
+        for model_alias in model_aliases:
+            dense_context = build_adaptive_context(
+                metadata,
+                ground_truth,
+                text_source=text_source,
+                embedding_model_alias=model_alias,
+                artifact_namespace=artifact_namespace,
+            )
             dense_detail, dense_summary = evaluate_dense_engine(
                 queryset=ground_truth,
                 metadata=metadata,
                 model_alias=model_alias,
                 text_source=text_source,
-                top_k=top_k,
+                top_k=adaptive_top_k,
                 hallucination_threshold=hallucination_threshold,
+                adaptive_context=dense_context,
+                parameter_mode="adaptive",
                 artifact_namespace=artifact_namespace,
             )
             detail_frames.append(dense_detail)
             summary_rows.append(dense_summary)
 
+        fused_detail, fused_summary = evaluate_fused_engine(
+            queryset=ground_truth,
+            metadata=metadata,
+            text_source=text_source,
+            top_k=adaptive_top_k,
+            hallucination_threshold=hallucination_threshold,
+            adaptive_context=adaptive_context,
+            parameter_mode="adaptive",
+            artifact_namespace=artifact_namespace,
+        )
+        detail_frames.append(fused_detail)
+        summary_rows.append(fused_summary)
+
+        if include_static_reference:
+            static_context = build_static_reference_context(
+                metadata,
+                ground_truth,
+                text_source=text_source,
+                artifact_namespace=artifact_namespace,
+            )
+            static_top_k = top_k if top_k is not None else adaptive_top_k
+
+            keyword_bm25_detail, keyword_bm25_summary = evaluate_keyword_engine(
+                queryset=ground_truth,
+                metadata=metadata,
+                method="bm25",
+                text_source=text_source,
+                top_k=static_top_k,
+                hallucination_threshold=hallucination_threshold,
+                adaptive_context=static_context,
+                parameter_mode="static_reference",
+            )
+            detail_frames.append(keyword_bm25_detail)
+            summary_rows.append(keyword_bm25_summary)
+
+            keyword_tfidf_detail, keyword_tfidf_summary = evaluate_keyword_engine(
+                queryset=ground_truth,
+                metadata=metadata,
+                method="tfidf",
+                text_source=text_source,
+                top_k=static_top_k,
+                hallucination_threshold=hallucination_threshold,
+                adaptive_context=static_context,
+                parameter_mode="static_reference",
+            )
+            detail_frames.append(keyword_tfidf_detail)
+            summary_rows.append(keyword_tfidf_summary)
+
+            for model_alias in model_aliases:
+                dense_context = build_static_reference_context(
+                    metadata,
+                    ground_truth,
+                    text_source=text_source,
+                    embedding_model_alias=model_alias,
+                    artifact_namespace=artifact_namespace,
+                )
+                dense_detail, dense_summary = evaluate_dense_engine(
+                    queryset=ground_truth,
+                    metadata=metadata,
+                    model_alias=model_alias,
+                    text_source=text_source,
+                    top_k=static_top_k,
+                    hallucination_threshold=hallucination_threshold,
+                    adaptive_context=dense_context,
+                    parameter_mode="static_reference",
+                    artifact_namespace=artifact_namespace,
+                )
+                detail_frames.append(dense_detail)
+                summary_rows.append(dense_summary)
+
+            fused_detail, fused_summary = evaluate_fused_engine(
+                queryset=ground_truth,
+                metadata=metadata,
+                text_source=text_source,
+                top_k=static_top_k,
+                hallucination_threshold=hallucination_threshold,
+                adaptive_context=static_context,
+                parameter_mode="static_reference",
+                artifact_namespace=artifact_namespace,
+            )
+            detail_frames.append(fused_detail)
+            summary_rows.append(fused_summary)
+
     detail = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame(columns=_detail_columns())
-    summary = pd.DataFrame(summary_rows, columns=_summary_columns(top_k))
+    summary_top_k = int(max(summary_rows[0]["top_k"], 1)) if summary_rows else fallback_top_k
+    summary = pd.DataFrame(summary_rows, columns=_summary_columns(summary_top_k))
     comparison = _build_source_comparison(summary)
+
+    adaptive_summary = summary.loc[summary["parameter_mode"] == "adaptive"].reset_index(drop=True)
+    static_summary = summary.loc[summary["parameter_mode"] == "static_reference"].reset_index(drop=True)
+    mode_comparison = compare_summary_frames(static_summary, adaptive_summary)
 
     save_dataframe(evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace), detail)
     save_dataframe(evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace), summary)
     save_dataframe(evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace), comparison)
+    save_dataframe(evaluation_artifact_path("retrieval_eval_mode_comparison.csv", artifact_namespace), mode_comparison)
     save_json(
         evaluation_artifact_path("retrieval_eval_summary.json", artifact_namespace),
         summary.to_dict(orient="records"),
@@ -434,18 +673,24 @@ def evaluate_all(
             _console_print(line)
 
     if print_report:
-        _console_print(f"[EVAL] 기준 정의: {evaluation_definition_text(raw_queryset)}")
-        _console_print(f"[EVAL] Accuracy@1은 top-1 결과가 정답셋에 포함되면 1, 아니면 0입니다.")
-        _console_print(f"[EVAL] Precision@{top_k}, Recall@{top_k}, F1@{top_k}는 동일한 ground truth 기준으로 계산합니다.")
-        for system_name, system_frame in detail.groupby(["system_name", "text_source"], sort=False):
-            _console_print(f"[EVAL] --- {system_name[0]} / {system_name[1]} ---")
+        _console_print(f"[EVAL] definition: {evaluation_definition_text(raw_queryset)}")
+        _console_print("[EVAL] accuracy@1 is 1 when the top result is relevant, otherwise 0.")
+        report_top_k = int(summary["top_k"].iloc[0]) if not summary.empty else fallback_top_k
+        for system_name, system_frame in detail.groupby(["system_name", "text_source", "parameter_mode"], sort=False):
+            _console_print(f"[EVAL] --- {system_name[0]} / {system_name[1]} / {system_name[2]} ---")
             for _, row in system_frame.iterrows():
-                for line in format_query_console_report(row, top_k=top_k):
+                for line in format_query_console_report(row, top_k=report_top_k):
                     _console_print(line)
-        for line in format_summary_console_report(summary, top_k=top_k):
+        for line in format_summary_console_report(summary, top_k=report_top_k):
             _console_print(line)
 
-    return {"detail": detail, "summary": summary, "comparison": comparison, "ground_truth": ground_truth}
+    return {
+        "detail": detail,
+        "summary": summary,
+        "comparison": comparison,
+        "mode_comparison": mode_comparison,
+        "ground_truth": ground_truth,
+    }
 
 
 def main() -> None:
@@ -453,10 +698,12 @@ def main() -> None:
     parser.add_argument("--metadata-path", type=Path, default=DEFAULT_METADATA_CSV)
     parser.add_argument("--queryset-path", type=Path, default=DEFAULT_QUERYSET_CSV)
     parser.add_argument("--artifact-namespace", type=str, default=None)
-    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--show-metrics", action="store_true")
     parser.add_argument("--show-weights", action="store_true")
-    parser.add_argument("--hallucination-threshold", type=float, default=DEFAULT_HALLUCINATION_THRESHOLD)
+    parser.add_argument("--hallucination-threshold", type=float, default=None)
+    parser.add_argument("--no-static-reference", dest="include_static_reference", action="store_false")
+    parser.set_defaults(include_static_reference=True)
     parser.add_argument(
         "--text-sources",
         nargs="+",
@@ -476,6 +723,7 @@ def main() -> None:
         hallucination_threshold=args.hallucination_threshold,
         print_report=args.show_metrics,
         show_weights=args.show_weights,
+        include_static_reference=args.include_static_reference,
     )
     _console_print(outputs["summary"].to_string(index=False))
     if args.show_weights:

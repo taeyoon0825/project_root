@@ -20,6 +20,12 @@ import pandas as pd
 import plotly
 import plotly.io as pio
 
+from src.adaptive.parameter_resolver import (
+    AdaptiveContext,
+    build_adaptive_context,
+    resolve_metric_config,
+    resolve_top_k,
+)
 from src.config import (
     CLUSTERS_DIR,
     DEFAULT_QUERYSET_CSV,
@@ -46,10 +52,13 @@ from src.evaluation.reporting import build_model_weight_frame
 from src.evaluation.soft_metrics import f1_score
 from src.ingest.incremental_registry import load_incremental_run_summary
 from src.search.keyword_search import KeywordSearchEngine
+from src.search.query_preview import extract_dense_preview, extract_keyword_preview
+from src.retrieval.fused_search import FusedSearchEngine
 from src.search.load_realdata_dataset import dataset_artifact_namespace, load_search_metadata
-from src.search.text_source import resolve_primary_text, split_text_into_lines
+from src.search.text_source import DEFAULT_TEXT_SOURCE, resolve_primary_text, split_text_into_lines
 from src.stt.batch_transcribe import transcribe_audio_batch
 from src.utils.io_utils import load_json, save_json
+from src.utils.device import device_payload
 from src.visualize.clustering import (
     cluster_embeddings,
     load_cluster_frame,
@@ -173,6 +182,28 @@ def _table_payload(frame: pd.DataFrame, columns: list[str] | None = None, limit:
     }
 
 
+def _parse_requested_top_k(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _adaptive_payload(context: AdaptiveContext | None) -> dict[str, Any]:
+    if context is None:
+        return {}
+    return {
+        "profile": _json_safe(context.profile.to_dict()),
+        "search": _json_safe(context.search.to_dict()),
+        "language": _json_safe(context.language.to_dict()),
+        "metric": _json_safe(context.metric.to_dict()),
+        "cluster": _json_safe(context.cluster.to_dict()),
+        "visualization": _json_safe(context.visualization.to_dict()),
+    }
+
+
 def _load_base_queryset() -> pd.DataFrame:
     if DEFAULT_QUERYSET_CSV.exists():
         return pd.read_csv(DEFAULT_QUERYSET_CSV)
@@ -251,14 +282,47 @@ def annotate_search_results(
     query_row: pd.Series,
     metadata: pd.DataFrame,
     top_k: int,
-    hallucination_threshold: float = DEFAULT_HALLUCINATION_THRESHOLD,
+    *,
+    preview_mode: str,
+    keyword_method: str = "bm25",
+    dense_wrapper: Any | None = None,
+    hallucination_threshold: float | None = DEFAULT_HALLUCINATION_THRESHOLD,
 ) -> tuple[pd.DataFrame, set[str]]:
     relevant_ids = resolve_relevant_ids(query_row, metadata)
-    query_preview = truncate_text(query_row.get("query", ""), 80)
+    query_text = str(query_row.get("query", "")).strip()
+    metadata_lookup = (
+        metadata.copy()
+        .assign(id=metadata["id"].fillna("").astype(str))
+        .drop_duplicates(subset=["id"], keep="first")
+        .set_index("id")
+    )
     hits = 0
     rows: list[dict[str, Any]] = []
     for rank, row in enumerate(results.head(top_k).itertuples(index=False), start=1):
         row_map = pd.Series(row._asdict())
+        row_id = str(row_map.get("id", "")).strip()
+        source_text = ""
+        if row_id and row_id in metadata_lookup.index:
+            source_text = resolve_primary_text(
+                metadata_lookup.loc[row_id],
+                text_source=str(row_map.get("search_source", DEFAULT_TEXT_SOURCE) or DEFAULT_TEXT_SOURCE),
+            )
+        if preview_mode == "keyword":
+            query_preview = extract_keyword_preview(
+                source_text,
+                query_text,
+                method=keyword_method,
+                length=int(row_map.get("adaptive_preview_length", 0) or 0) or None,
+                match_payload=row_map.to_dict(),
+            )
+        else:
+            query_preview = extract_dense_preview(
+                source_text,
+                query_text,
+                model=dense_wrapper,
+                length=int(row_map.get("adaptive_preview_length", 0) or 0) or None,
+                match_payload=row_map.to_dict(),
+            )
         is_relevant = str(getattr(row, "id", "")) in relevant_ids
         hits += int(is_relevant)
         precision = hits / rank
@@ -266,7 +330,8 @@ def annotate_search_results(
         accuracy = 1.0 if rank == 1 and is_relevant else 0.0
         f1 = f1_score(precision, recall)
         similarity = float(getattr(row, "similarity_score", 0.0) or 0.0)
-        hallucination = bool((not is_relevant) and similarity >= hallucination_threshold)
+        threshold_used = hallucination_threshold if hallucination_threshold is not None else DEFAULT_HALLUCINATION_THRESHOLD
+        hallucination = bool((not is_relevant) and similarity >= threshold_used)
         rows.append(
             {
                 **row._asdict(),
@@ -277,6 +342,7 @@ def annotate_search_results(
                 "accuracy": accuracy,
                 "f1_score": f1,
                 "hallucination_flag": "YES" if hallucination else "NO",
+                "hallucination_threshold_used": threshold_used,
                 "search_location": resolve_location_display(row_map),
                 "query_preview": query_preview,
             }
@@ -350,12 +416,35 @@ def ensure_artifacts(
     text_source: str,
     model_aliases: list[str],
     cluster_method: str,
-    n_clusters: int = 6,
+    n_clusters: int | None = None,
     optional_methods: tuple[str, ...] = ("tsne",),
+    adaptive_context: AdaptiveContext | None = None,
 ) -> None:
-    KeywordSearchEngine(metadata, text_source=text_source).export_index_metadata(artifact_namespace=artifact_namespace)
+    keyword_context = adaptive_context or build_adaptive_context(
+        metadata,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+    )
+    KeywordSearchEngine(
+        metadata,
+        text_source=text_source,
+        adaptive_context=keyword_context,
+        artifact_namespace=artifact_namespace,
+    ).export_index_metadata(artifact_namespace=artifact_namespace)
     for model_alias in model_aliases:
-        dense_engine = DenseSearchEngine(metadata, model_alias, text_source=text_source, artifact_namespace=artifact_namespace)
+        dense_context = build_adaptive_context(
+            metadata,
+            text_source=text_source,
+            embedding_model_alias=model_alias,
+            artifact_namespace=artifact_namespace,
+        )
+        dense_engine = DenseSearchEngine(
+            metadata,
+            model_alias,
+            text_source=text_source,
+            artifact_namespace=artifact_namespace,
+            adaptive_context=dense_context,
+        )
         dense_engine.load()
 
         projection_paths = [
@@ -377,6 +466,7 @@ def ensure_artifacts(
                 text_source=text_source,
                 optional_methods=optional_methods,
                 artifact_namespace=artifact_namespace,
+                adaptive_context=dense_context,
             )
 
         cluster_csv = CLUSTERS_DIR / f"{artifact_stem(model_alias, text_source, artifact_namespace)}_{cluster_method}_clusters.csv"
@@ -389,6 +479,7 @@ def ensure_artifacts(
                     n_clusters=n_clusters,
                     text_source=text_source,
                     artifact_namespace=artifact_namespace,
+                    adaptive_context=dense_context,
                 )
             except Exception:
                 if cluster_method != "kmeans":
@@ -437,6 +528,7 @@ def ensure_evaluation_artifacts(metadata: pd.DataFrame, query_catalog: pd.DataFr
         evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace),
         evaluation_artifact_path("retrieval_eval_detail.csv", artifact_namespace),
         evaluation_artifact_path("retrieval_eval_source_comparison.csv", artifact_namespace),
+        evaluation_artifact_path("retrieval_eval_mode_comparison.csv", artifact_namespace),
     ]
     if all(path.exists() for path in required_paths) and manifest_path.exists():
         try:
@@ -630,8 +722,8 @@ def handle_upload(form: cgi.FieldStorage) -> dict[str, Any]:
     title = str(form.getfirst("title", "") or "").strip() or Path(original_name).stem
     description = str(form.getfirst("description", "") or "").strip()
     tags = str(form.getfirst("tags", "") or "").strip()
-    whisper_model = str(form.getfirst("whisperModel", "base") or "base").strip() or "base"
-    language = str(form.getfirst("language", "ko") or "ko").strip() or "ko"
+    whisper_model = str(form.getfirst("whisperModel", "") or "").strip() or None
+    language = str(form.getfirst("language", "") or "").strip() or None
 
     try:
         convert_media_to_wav(source_path, wav_path, overwrite=True)
@@ -655,7 +747,12 @@ def handle_upload(form: cgi.FieldStorage) -> dict[str, Any]:
         row = _finalize_upload_metadata(doc_id, title, tags)
     except Exception as exc:
         _update_upload_error(REALDATA_METADATA_CSV, doc_id, str(exc))
-        raise
+        return {
+            "ok": False,
+            "error": str(exc),
+            "device": device_payload(),
+            "docId": doc_id,
+        }
 
     transcript = str(row.get("stt_transcript", "")).strip()
     search_query = " ".join(part for part in [str(row.get("title", "")), str(row.get("keywords", "")), " ".join(transcript.split()[:8])] if part).strip()
@@ -667,11 +764,13 @@ def handle_upload(form: cgi.FieldStorage) -> dict[str, Any]:
         "sourcePath": str(source_path),
         "wavPath": str(wav_path),
         "transcriptPath": str(transcript_path),
+        "sttCsvPath": str(row.get("stt_csv_path", "")),
         "title": str(row.get("title", "")),
         "searchQuery": search_query,
         "transcriptPreview": transcript[:240],
         "metadataPath": str(REALDATA_METADATA_CSV),
         "uploadRoot": str(HTML_UPLOAD_MEDIA_DIR.parent),
+        "device": device_payload(),
     }
 
 
@@ -716,6 +815,11 @@ def get_options() -> dict[str, Any]:
     namespace = _artifact_namespace(metadata_path, None)
     catalog, catalog_path = build_query_catalog(metadata, namespace) if not metadata.empty else (pd.DataFrame(), Path(""))
     model_aliases = list(list_available_models(include_optional=False).keys())
+    adaptive_context = (
+        build_adaptive_context(metadata, catalog, text_source=DEFAULT_TEXT_SOURCE, artifact_namespace=namespace)
+        if not metadata.empty
+        else None
+    )
     return {
         "sourceTypes": source_types,
         "defaultSourceTypes": default_source_types,
@@ -730,29 +834,41 @@ def get_options() -> dict[str, Any]:
         "metadataPath": str(metadata_path),
         "artifactNamespace": namespace,
         "documentCount": int(len(metadata)),
+        "adaptive": _adaptive_payload(adaptive_context),
+        "recommendedTopK": resolve_top_k(adaptive_context.profile, None) if adaptive_context is not None else 5,
+        "recommendedClusters": adaptive_context.cluster.n_clusters if adaptive_context is not None else None,
+        "device": device_payload(),
     }
 
 
 def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
     source_types = list(payload.get("sourceTypes") or [])
-    text_source = str(payload.get("textSource") or "stt_transcript")
-    keyword_method = str(payload.get("keywordMethod") or "bm25")
-    top_k = max(1, min(50, int(payload.get("topK") or 5)))
-    cluster_method = str(payload.get("clusterMethod") or "kmeans")
+    text_source = "stt_transcript"
+    keyword_method = "bm25"
+    requested_top_k = None
+    cluster_method = "kmeans"
     query_input = str(payload.get("query") or "").strip()
+    debug_mode = bool(payload.get("debugMode", False))
     model_aliases = list(list_available_models(include_optional=False).keys())
-    model_a = str(payload.get("modelA") or model_aliases[0])
-    model_b = str(payload.get("modelB") or model_aliases[min(1, len(model_aliases) - 1)])
+    model_a = "paraphrase-multilingual-MiniLM-L12-v2" if "paraphrase-multilingual-MiniLM-L12-v2" in model_aliases else model_aliases[0]
+    model_b = "multilingual-e5-base" if "multilingual-e5-base" in model_aliases else model_aliases[min(1, len(model_aliases) - 1)]
 
     if not query_input:
-        return {"ok": False, "error": "검색 문장을 입력해 주세요."}
+        return {"ok": False, "error": "검색 문장을 입력해 주세요.", "device": device_payload()}
 
     metadata, metadata_path = _load_filtered_metadata(source_types)
     if metadata.empty:
-        return {"ok": False, "error": "선택한 source_type에 해당하는 데이터가 없습니다."}
+        return {"ok": False, "error": "선택한 source_type에 해당하는 데이터가 없습니다.", "device": device_payload()}
 
     artifact_namespace = _artifact_namespace(metadata_path, source_types)
     catalog, catalog_path = build_query_catalog(metadata, artifact_namespace)
+    adaptive_context = build_adaptive_context(
+        metadata,
+        catalog,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+    )
+    top_k = resolve_top_k(adaptive_context.profile, requested_top_k)
     query_row = _selected_query_row(catalog, payload.get("queryId"), query_input, metadata, text_source)
     query = str(query_row.get("query", ""))
     ui_catalog = catalog.copy()
@@ -763,34 +879,140 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         elif not ui_catalog["query_id"].fillna("").astype(str).eq(str(query_row.get("query_id", ""))).any():
             ui_catalog = pd.concat([selected_query_frame, ui_catalog], ignore_index=True)
 
-    ensure_artifacts(metadata, artifact_namespace, text_source, [model_a, model_b], cluster_method, n_clusters=6)
-    keyword_engine = KeywordSearchEngine(metadata, text_source=text_source)
-    dense_engine_a = DenseSearchEngine(metadata, model_a, text_source=text_source, artifact_namespace=artifact_namespace)
-    dense_engine_b = DenseSearchEngine(metadata, model_b, text_source=text_source, artifact_namespace=artifact_namespace)
-    dense_engine_a.load()
-    dense_engine_b.load()
-
-    keyword_results = keyword_engine.search(query, top_k=top_k, method=keyword_method)
-    dense_results_a = dense_engine_a.search(query, top_k=top_k)
-    dense_results_b = dense_engine_b.search(query, top_k=top_k)
-    keyword_table, keyword_relevant = annotate_search_results(keyword_results, query_row, metadata, top_k)
-    dense_table_a, dense_relevant_a = annotate_search_results(dense_results_a, query_row, metadata, top_k)
-    dense_table_b, dense_relevant_b = annotate_search_results(dense_results_b, query_row, metadata, top_k)
-    summary = pd.DataFrame(
-        [
-            build_query_summary(f"keyword-{keyword_method}", keyword_table, keyword_relevant, top_k),
-            build_query_summary(model_a, dense_table_a, dense_relevant_a, top_k),
-            build_query_summary(model_b, dense_table_b, dense_relevant_b, top_k),
-        ]
+    ensure_artifacts(
+        metadata,
+        artifact_namespace,
+        text_source,
+        [model_a, model_b],
+        cluster_method,
+        n_clusters=None,
+        adaptive_context=adaptive_context,
     )
+    dense_context_a = build_adaptive_context(
+        metadata,
+        catalog,
+        text_source=text_source,
+        embedding_model_alias=model_a,
+        artifact_namespace=artifact_namespace,
+    )
+    dense_context_b = build_adaptive_context(
+        metadata,
+        catalog,
+        text_source=text_source,
+        embedding_model_alias=model_b,
+        artifact_namespace=artifact_namespace,
+    )
+    fused_engine = FusedSearchEngine(
+        metadata,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+        adaptive_context=adaptive_context,
+        minilm_alias=model_a,
+        e5_alias=model_b,
+    )
+    fused_results = fused_engine.search(query, top_k=top_k, keyword_method=keyword_method)
+    fused_metric = resolve_metric_config(
+        adaptive_context.profile,
+        score_values=fused_results["display_score"].astype(float).tolist(),
+    )
+    fused_table, fused_relevant = annotate_search_results(
+        fused_results,
+        query_row,
+        metadata,
+        top_k,
+        preview_mode="keyword",
+        keyword_method=keyword_method,
+        hallucination_threshold=fused_metric.hallucination_threshold,
+    )
+    summary_rows = [build_query_summary("fused-retrieval", fused_table, fused_relevant, top_k)]
+    debug_tables: dict[str, dict[str, Any]] = {}
+    if debug_mode:
+        keyword_engine = KeywordSearchEngine(
+            metadata,
+            text_source=text_source,
+            adaptive_context=adaptive_context,
+            artifact_namespace=artifact_namespace,
+        )
+        dense_engine_a = DenseSearchEngine(
+            metadata,
+            model_a,
+            text_source=text_source,
+            artifact_namespace=artifact_namespace,
+            adaptive_context=dense_context_a,
+        )
+        dense_engine_b = DenseSearchEngine(
+            metadata,
+            model_b,
+            text_source=text_source,
+            artifact_namespace=artifact_namespace,
+            adaptive_context=dense_context_b,
+        )
+        dense_engine_a.load()
+        dense_engine_b.load()
+        keyword_results = keyword_engine.search(query, top_k=top_k, method=keyword_method)
+        dense_results_a = dense_engine_a.search(query, top_k=top_k)
+        dense_results_b = dense_engine_b.search(query, top_k=top_k)
+        keyword_metric = resolve_metric_config(
+            adaptive_context.profile,
+            score_values=keyword_results["display_score"].astype(float).tolist(),
+        )
+        dense_metric_a = resolve_metric_config(
+            dense_context_a.profile,
+            score_values=dense_results_a["display_score"].astype(float).tolist(),
+        )
+        dense_metric_b = resolve_metric_config(
+            dense_context_b.profile,
+            score_values=dense_results_b["display_score"].astype(float).tolist(),
+        )
+        keyword_table, keyword_relevant = annotate_search_results(
+            keyword_results,
+            query_row,
+            metadata,
+            top_k,
+            preview_mode="keyword",
+            keyword_method=keyword_method,
+            hallucination_threshold=keyword_metric.hallucination_threshold,
+        )
+        dense_table_a, dense_relevant_a = annotate_search_results(
+            dense_results_a,
+            query_row,
+            metadata,
+            top_k,
+            preview_mode="dense",
+            dense_wrapper=dense_engine_a.wrapper,
+            hallucination_threshold=dense_metric_a.hallucination_threshold,
+        )
+        dense_table_b, dense_relevant_b = annotate_search_results(
+            dense_results_b,
+            query_row,
+            metadata,
+            top_k,
+            preview_mode="dense",
+            dense_wrapper=dense_engine_b.wrapper,
+            hallucination_threshold=dense_metric_b.hallucination_threshold,
+        )
+        summary_rows.extend(
+            [
+                build_query_summary(f"keyword-{keyword_method}", keyword_table, keyword_relevant, top_k),
+                build_query_summary(model_a, dense_table_a, dense_relevant_a, top_k),
+                build_query_summary(model_b, dense_table_b, dense_relevant_b, top_k),
+            ]
+        )
+        debug_tables = {
+            "keyword": _table_payload(build_search_table(keyword_table)),
+            "denseA": _table_payload(build_search_table(dense_table_a)),
+            "denseB": _table_payload(build_search_table(dense_table_b)),
+        }
+    summary = pd.DataFrame(summary_rows)
+    fused_current = summary.loc[summary["system_name"] == "fused-retrieval"].head(1)
 
     ensure_evaluation_artifacts(metadata, catalog, artifact_namespace, top_k=top_k)
     eval_summary = _load_eval_frame("retrieval_eval_summary.csv", artifact_namespace)
+    fused_eval = eval_summary.loc[eval_summary["system_name"] == "fused-retrieval"].head(1).copy() if not eval_summary.empty else pd.DataFrame()
     eval_detail = _load_eval_frame("retrieval_eval_detail.csv", artifact_namespace)
     eval_comparison = _load_eval_frame("retrieval_eval_source_comparison.csv", artifact_namespace)
-    candidate_ids = pd.unique(
-        pd.concat([keyword_results["id"], dense_results_a["id"], dense_results_b["id"]], ignore_index=True)
-    ).astype(str).tolist()
+    eval_mode_comparison = _load_eval_frame("retrieval_eval_mode_comparison.csv", artifact_namespace)
+    candidate_ids = fused_results["id"].astype(str).tolist()
 
     run_summary = load_incremental_run_summary(INCREMENTAL_RUN_SUMMARY_JSON)
     category_counts = metadata["category"].fillna("unknown").value_counts().reset_index()
@@ -805,15 +1027,36 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         "selectedQuery": _json_safe(query_row.to_dict()),
         "relevantSummary": relevant_file_summary(query_row, metadata),
         "querySummary": _table_payload(summary),
+        "fusedCurrentMetrics": _json_safe(fused_current.iloc[0].to_dict()) if not fused_current.empty else {},
         "tables": {
-            "keyword": _table_payload(build_search_table(keyword_table)),
-            "denseA": _table_payload(build_search_table(dense_table_a)),
-            "denseB": _table_payload(build_search_table(dense_table_b)),
+            "fused": _table_payload(build_search_table(fused_table)),
+            **debug_tables,
         },
+        "primarySystem": "fused",
+        "fusedExplainability": _table_payload(
+            fused_results[
+                [
+                    "rank",
+                    "id",
+                    "bm25_score",
+                    "minilm_score",
+                    "e5_score",
+                    "normalized_bm25",
+                    "normalized_minilm",
+                    "normalized_e5",
+                    "fused_score",
+                    "fusion_weights",
+                    "chosen_preview_reason",
+                    "ranking_reason",
+                ]
+            ]
+        ),
         "candidateIds": candidate_ids,
-        "evalSummary": _table_payload(eval_summary),
+        "evalSummary": _table_payload(eval_summary.loc[eval_summary["system_name"] == "fused-retrieval"].reset_index(drop=True)),
+        "fusedGlobalMetrics": _json_safe(fused_eval.iloc[0].to_dict()) if not fused_eval.empty else {},
         "evalDetail": _table_payload(eval_detail, limit=200),
         "evalComparison": _table_payload(eval_comparison),
+        "evalModeComparison": _table_payload(eval_mode_comparison),
         "dataset": {
             "documentCount": int(len(metadata)),
             "metadataPath": str(metadata_path),
@@ -823,7 +1066,15 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
             "metadataPreview": _table_payload(metadata.head(30)),
             "modelWeights": _table_payload(build_model_weight_frame(include_optional=False)),
             "runSummary": _json_safe(run_summary),
+            "adaptive": _adaptive_payload(adaptive_context),
         },
+        "adaptive": {
+            "base": _adaptive_payload(adaptive_context),
+            "denseA": _adaptive_payload(dense_context_a),
+            "denseB": _adaptive_payload(dense_context_b),
+            "resolvedTopK": top_k,
+        },
+        "device": device_payload(),
     }
 
 
@@ -866,16 +1117,38 @@ def handle_plot(payload: dict[str, Any]) -> dict[str, Any]:
     plot_mode = str(payload.get("plotMode") or "PCA 3D")
     cluster_method = str(payload.get("clusterMethod") or "kmeans")
     color_by = str(payload.get("colorBy") or "category")
-    top_k = max(1, min(50, int(payload.get("topK") or 5)))
+    requested_top_k = _parse_requested_top_k(payload.get("topK"))
     query = str(payload.get("query") or "")
     method, dimensions = PLOT_MODE_OPTIONS.get(plot_mode, ("pca", 3))
     optional_methods = tuple([method]) if method in {"tsne", "umap"} else ("tsne",)
 
     metadata, metadata_path = _load_filtered_metadata(source_types)
     artifact_namespace = _artifact_namespace(metadata_path, source_types)
-    ensure_artifacts(metadata, artifact_namespace, text_source, [model_alias], cluster_method, optional_methods=optional_methods)
+    adaptive_context = build_adaptive_context(
+        metadata,
+        text_source=text_source,
+        embedding_model_alias=model_alias,
+        artifact_namespace=artifact_namespace,
+    )
+    top_k = resolve_top_k(adaptive_context.profile, requested_top_k)
+    ensure_artifacts(
+        metadata,
+        artifact_namespace,
+        text_source,
+        [model_alias],
+        cluster_method,
+        n_clusters=None,
+        optional_methods=optional_methods,
+        adaptive_context=adaptive_context,
+    )
 
-    dense_engine = DenseSearchEngine(metadata, model_alias, text_source=text_source, artifact_namespace=artifact_namespace)
+    dense_engine = DenseSearchEngine(
+        metadata,
+        model_alias,
+        text_source=text_source,
+        artifact_namespace=artifact_namespace,
+        adaptive_context=adaptive_context,
+    )
     dense_engine.load()
     score_frame = dense_engine.score_all(query)
     results = dense_engine.search(query, top_k=top_k)
@@ -913,6 +1186,8 @@ def handle_plot(payload: dict[str, Any]) -> dict[str, Any]:
         "clusterSummary": _json_safe(cluster_summary),
         "representatives": _table_payload(representatives),
         "pcaVariance": _json_safe(pca_variance),
+        "adaptive": _adaptive_payload(adaptive_context),
+        "resolvedTopK": top_k,
     }
 
 
