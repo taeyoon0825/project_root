@@ -99,8 +99,9 @@ PLOT_MODE_OPTIONS = {
 SEARCH_TABLE_COLUMNS = [
     "rank",
     "file_name",
-    "is_relevant",
-    "similarity_score",
+    "relative_match_score",
+    "normalized_relevance_score",
+    "ranking_confidence_score",
     "matched_tokens",
     "title_match_count",
     "description_match_count",
@@ -470,8 +471,20 @@ def build_query_summary(system_name: str, annotated: pd.DataFrame, relevant_ids:
 
 def build_search_table(annotated: pd.DataFrame) -> pd.DataFrame:
     display = annotated.copy()
+    if "similarity_score" in display.columns:
+        # query-internal relative ranking score (top row can be 100)
+        display["relative_match_score"] = display["similarity_score"].astype(float)
+    if "final_score" in display.columns:
+        # absolute-ish fused/engine score for this query (not min-max top1 fixed 100)
+        display["normalized_relevance_score"] = display["final_score"].astype(float) * 100.0
+    if "reranker_score" in display.columns:
+        display["ranking_confidence_score"] = display["reranker_score"].astype(float) * 100.0
+    else:
+        display["ranking_confidence_score"] = 0.0
     for column in [
-        "similarity_score",
+        "relative_match_score",
+        "normalized_relevance_score",
+        "ranking_confidence_score",
         "accuracy",
         "precision",
         "recall",
@@ -703,12 +716,21 @@ def ensure_evaluation_artifacts(metadata: pd.DataFrame, query_catalog: pd.DataFr
 def relevant_file_summary(query_row: pd.Series, metadata: pd.DataFrame) -> str:
     relevant_ids = resolve_relevant_ids(query_row, metadata)
     if not relevant_ids:
-        return "정답 문서가 없습니다. 이 질의는 점수 계산에서 제외되어야 합니다."
+        return "수동 질의 또는 정답 매핑 미지정 상태입니다. 검색 결과는 표시되지만 정답 기반 평가는 수행되지 않습니다."
     matched = metadata.loc[metadata["id"].fillna("").astype(str).isin(relevant_ids)]
     names = matched["file_name"].fillna("").astype(str).tolist()
     if names:
         return f"정답 문서 {len(relevant_ids)}개: {', '.join(names[:3])}" + (" ..." if len(names) > 3 else "")
     return f"정답 문서 {len(relevant_ids)}개: {', '.join(sorted(relevant_ids)[:3])}"
+
+
+def _score_semantics_payload() -> dict[str, str]:
+    return {
+        "relative_match_score": "질의 내부 상대 점수(0~100). 같은 질의의 후보 간 상대값이며 top1이 100일 수 있습니다.",
+        "normalized_relevance_score": "최종 rank에 쓰인 점수(final_score)의 직접 스케일(0~100). 상대점수와 별도로 해석하세요.",
+        "ranking_confidence_score": "reranker confidence score(0~100). reranker 미적용 시 0으로 표시됩니다.",
+        "is_relevant": "ground-truth 기준 판정값입니다. 수동 질의에서 정답 매핑이 없으면 false로 표시될 수 있습니다.",
+    }
 
 
 def build_plot_frame(
@@ -989,6 +1011,7 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
     cluster_method = "kmeans"
     query_input = str(payload.get("query") or "").strip()
     debug_mode = bool(payload.get("debugMode", False))
+    include_details = bool(payload.get("includeDetails", False)) or debug_mode
     model_aliases = list(list_available_models(include_optional=False).keys())
     model_a = "paraphrase-multilingual-MiniLM-L12-v2" if "paraphrase-multilingual-MiniLM-L12-v2" in model_aliases else model_aliases[0]
     model_b = "multilingual-e5-base" if "multilingual-e5-base" in model_aliases else model_aliases[min(1, len(model_aliases) - 1)]
@@ -1169,14 +1192,32 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         }
     summary = pd.DataFrame(summary_rows)
     fused_current = summary.loc[summary["system_name"] == "fused-retrieval"].head(1)
+    fused_current_metrics = _json_safe(fused_current.iloc[0].to_dict()) if not fused_current.empty else {}
+    has_ground_truth = bool(fused_current_metrics.get("has_ground_truth", False))
+    fused_top1_row = fused_table.iloc[0] if not fused_table.empty else pd.Series(dtype=object)
+    final_selection = {
+        "doc_id": str(fused_top1_row.get("id", "")),
+        "file_name": str(fused_top1_row.get("file_name", "")),
+        "relative_match_score": float(fused_top1_row.get("similarity_score", 0.0) or 0.0),
+        "normalized_relevance_score": float(fused_top1_row.get("final_score", 0.0) or 0.0) * 100.0,
+        "final_score": float(fused_top1_row.get("final_score", 0.0) or 0.0),
+        "reranker_score": float(fused_top1_row.get("reranker_score", 0.0) or 0.0),
+        "ranking_confidence_score": float(fused_top1_row.get("reranker_score", 0.0) or 0.0) * 100.0,
+        "ranking_reason": str(fused_top1_row.get("ranking_reason", "")),
+        "chosen_preview_reason": str(fused_top1_row.get("chosen_preview_reason", "")),
+        "preview": str(fused_top1_row.get("query_preview", "")),
+    }
 
     eval_catalog = _evaluation_catalog(catalog)
-    ensure_evaluation_artifacts(metadata, eval_catalog, artifact_namespace, top_k=top_k)
+    eval_summary_path = evaluation_artifact_path("retrieval_eval_summary.csv", artifact_namespace)
+    should_refresh_eval = include_details or (not eval_summary_path.exists())
+    if should_refresh_eval:
+        ensure_evaluation_artifacts(metadata, eval_catalog, artifact_namespace, top_k=top_k)
     eval_summary = _load_eval_frame("retrieval_eval_summary.csv", artifact_namespace)
     fused_eval = eval_summary.loc[eval_summary["system_name"] == "fused-retrieval"].head(1).copy() if not eval_summary.empty else pd.DataFrame()
-    eval_detail = _load_eval_frame("retrieval_eval_detail.csv", artifact_namespace)
-    eval_comparison = _load_eval_frame("retrieval_eval_source_comparison.csv", artifact_namespace)
-    eval_mode_comparison = _load_eval_frame("retrieval_eval_mode_comparison.csv", artifact_namespace)
+    eval_detail = _load_eval_frame("retrieval_eval_detail.csv", artifact_namespace) if include_details else pd.DataFrame()
+    eval_comparison = _load_eval_frame("retrieval_eval_source_comparison.csv", artifact_namespace) if include_details else pd.DataFrame()
+    eval_mode_comparison = _load_eval_frame("retrieval_eval_mode_comparison.csv", artifact_namespace) if include_details else pd.DataFrame()
     candidate_ids = fused_results["id"].astype(str).tolist()
 
     run_summary = load_incremental_run_summary(INCREMENTAL_RUN_SUMMARY_JSON)
@@ -1188,11 +1229,21 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         "artifactNamespace": artifact_namespace,
         "metadataPath": str(metadata_path),
         "queryCatalogPath": str(catalog_path),
-        "queryCatalog": _table_payload(ui_catalog),
+        "queryCatalog": _table_payload(ui_catalog) if include_details else {"columns": [], "rows": []},
         "selectedQuery": _json_safe(query_row.to_dict()),
         "relevantSummary": relevant_file_summary(query_row, metadata),
         "querySummary": _table_payload(summary),
-        "fusedCurrentMetrics": _json_safe(fused_current.iloc[0].to_dict()) if not fused_current.empty else {},
+        "fusedCurrentMetrics": fused_current_metrics,
+        "evaluationStatus": {
+            "has_ground_truth": has_ground_truth,
+            "message": (
+                "정답 매핑이 없어 평가 불가 상태입니다. 검색 결과 순위만 해석하세요."
+                if not has_ground_truth
+                else "정답 매핑 기반 평가가 가능합니다."
+            ),
+        },
+        "finalFusedSelection": _json_safe(final_selection),
+        "scoreSemantics": _score_semantics_payload(),
         "tables": {
             "fused": _table_payload(build_search_table(fused_table)),
             **debug_tables,
@@ -1234,18 +1285,18 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         "candidateIds": candidate_ids,
         "evalSummary": _table_payload(eval_summary.loc[eval_summary["system_name"] == "fused-retrieval"].reset_index(drop=True)),
         "fusedGlobalMetrics": _json_safe(fused_eval.iloc[0].to_dict()) if not fused_eval.empty else {},
-        "evalDetail": _table_payload(eval_detail, limit=200),
-        "evalComparison": _table_payload(eval_comparison),
-        "evalModeComparison": _table_payload(eval_mode_comparison),
+        "evalDetail": _table_payload(eval_detail, limit=200) if include_details else {"columns": [], "rows": []},
+        "evalComparison": _table_payload(eval_comparison) if include_details else {"columns": [], "rows": []},
+        "evalModeComparison": _table_payload(eval_mode_comparison) if include_details else {"columns": [], "rows": []},
         "dataset": {
             "documentCount": int(len(metadata)),
             "metadataPath": str(metadata_path),
             "artifactNamespace": artifact_namespace,
             "categoryCounts": _frame_records(category_counts),
-            "queryCatalog": _table_payload(ui_catalog),
-            "metadataPreview": _table_payload(metadata.head(30)),
-            "modelWeights": _table_payload(build_model_weight_frame(include_optional=False)),
-            "runSummary": _json_safe(run_summary),
+            "queryCatalog": _table_payload(ui_catalog) if include_details else {"columns": [], "rows": []},
+            "metadataPreview": _table_payload(metadata.head(30)) if include_details else {"columns": [], "rows": []},
+            "modelWeights": _table_payload(build_model_weight_frame(include_optional=False)) if include_details else {"columns": [], "rows": []},
+            "runSummary": _json_safe(run_summary) if include_details else {},
             "adaptive": _adaptive_payload(adaptive_context),
         },
         "adaptive": {

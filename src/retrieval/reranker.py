@@ -8,34 +8,39 @@ import numpy as np
 from src.config import HF_CACHE_DIR
 from src.utils.hf_cache import resolve_local_hf_snapshot
 
-try:
-    from sentence_transformers import CrossEncoder
-except Exception:  # pragma: no cover
-    CrossEncoder = None
-
 
 @dataclass
 class CrossEncoderReranker:
     model_name: str
 
-    _CACHE: ClassVar[dict[str, "CrossEncoder"]] = {}
+    _CACHE: ClassVar[dict[str, object]] = {}
 
     def __post_init__(self) -> None:
         return
 
+    @staticmethod
+    def _resolve_cross_encoder():
+        try:
+            from sentence_transformers import CrossEncoder
+
+            return CrossEncoder
+        except Exception:  # pragma: no cover
+            return None
+
     def _model(self):
-        if CrossEncoder is None:
+        cross_encoder_cls = self._resolve_cross_encoder()
+        if cross_encoder_cls is None:
             return None
         if self.model_name not in self._CACHE:
             local_snapshot = resolve_local_hf_snapshot(self.model_name)
             try:
-                self._CACHE[self.model_name] = CrossEncoder(
+                self._CACHE[self.model_name] = cross_encoder_cls(
                     local_snapshot or self.model_name,
                     cache_folder=str(HF_CACHE_DIR),
                     local_files_only=True,
                 )
             except Exception:
-                self._CACHE[self.model_name] = CrossEncoder(self.model_name, cache_folder=str(HF_CACHE_DIR))
+                self._CACHE[self.model_name] = cross_encoder_cls(self.model_name, cache_folder=str(HF_CACHE_DIR))
         return self._CACHE[self.model_name]
 
     def score(self, query: str, candidates: list[str]) -> np.ndarray:

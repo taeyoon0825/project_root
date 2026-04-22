@@ -39,6 +39,35 @@
       topk_hit_rate: "Top-k hit rate",
       hallucination_rate: "Hallucination rate",
     };
+    const fusedColumnLabelMap = {
+      rank: "순위",
+      file_name: "문서명",
+      relative_match_score: "상대 매칭 점수",
+      normalized_relevance_score: "정규화 관련도",
+      ranking_confidence_score: "리랭커 신뢰도",
+      matched_tokens: "일치 토큰",
+      title_match_count: "제목 일치 수",
+      description_match_count: "설명 일치 수",
+      tags_match_count: "태그 일치 수",
+      transcript_match_count: "전사 일치 수",
+      lexical_score: "키워드 점수",
+      semantic_score: "의미 점수",
+      final_score: "최종 융합 점수",
+      reason: "선정 사유",
+      precision: "정밀도",
+      recall: "재현율",
+      f1_score: "F1",
+      accuracy: "정확도",
+      hallucination_flag: "환각 여부",
+      search_location: "검색 위치",
+      query_preview: "미리보기",
+    };
+    const fusedColumnTooltipMap = {
+      relative_match_score: "같은 질의 내부 후보 간 상대 순위 점수입니다. top1이 100일 수 있으며 절대 정답 점수가 아닙니다.",
+      normalized_relevance_score: "최종 랭킹에 사용된 final_score를 0~100으로 표현한 값입니다. 질의 간 절대 비교용은 아닙니다.",
+      ranking_confidence_score: "리랭커가 부여한 신뢰도 점수(0~100)입니다. 리랭커 미적용 시 0입니다.",
+      final_score: "BM25 + Dense + reranker 결합 후 최종 정렬에 사용된 원점수입니다.",
+    };
 
     function fmt(v) {
       if (v === null || v === undefined || v === "") return "-";
@@ -68,11 +97,20 @@
       if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) {
         return e("div", { className: "card" }, e("h3", null, title), e("div", { className: "muted" }, "데이터 없음"));
       }
+      const isFusedTopK = title === "Fused Top-K 결과";
+      const labelFor = (column) => {
+        if (!isFusedTopK) return column;
+        return fusedColumnLabelMap[column] || column;
+      };
+      const tooltipFor = (column) => {
+        if (!isFusedTopK) return "";
+        return fusedColumnTooltipMap[column] || "";
+      };
       return e("div", { className:"card" },
         e("h3", null, title),
         e("div", { style:{ overflow:"auto" } },
           e("table", null,
-            e("thead", null, e("tr", null, ...table.columns.map((c)=>e("th",{key:c},c)))),
+            e("thead", null, e("tr", null, ...table.columns.map((c)=>e("th",{key:c, title: tooltipFor(c)},labelFor(c)))),
             e("tbody", null, ...table.rows.map((r,i)=>e("tr",{key:i}, ...table.columns.map((c)=>e("td",{key:c}, fmt(r[c]))))))
           )
         )
@@ -131,15 +169,26 @@
       const runSearch = async () => {
         if (!query.trim()) { setStatus("검색어를 입력하세요."); return; }
         setStatus("검색 중...");
-        const resp = await fetch("/api/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, debugMode: debug }),
-        });
-        const d = await resp.json();
-        if (!d.ok) { setStatus(d.error || "검색 실패"); return; }
-        setResult(d);
-        setStatus("검색 완료");
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 90000);
+          const started = performance.now();
+          const resp = await fetch("/api/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query, debugMode: debug, includeDetails: debug }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          const d = await resp.json();
+          if (!d.ok) { setStatus(d.error || "검색 실패"); return; }
+          setResult(d);
+          const elapsedMs = Math.round(performance.now() - started);
+          setStatus(`검색 완료 (${elapsedMs}ms)`);
+        } catch (err) {
+          const message = err && err.name === "AbortError" ? "검색 시간이 초과되었습니다. 질의를 단순화하거나 Debug를 끄고 다시 시도하세요." : ("검색 실패: " + String(err));
+          setStatus(message);
+        }
       };
 
       const device = result?.device?.device || options?.device?.device || "unknown";
@@ -157,17 +206,27 @@
         result ? e("div", null,
           e("div", { className: "card" },
             e("h3", null, "최종 Fused 결과"),
-            e("div", { className: "muted" }, result.relevantSummary || ""),
+            e("div", { className: "muted" }, "선택 문서: " + (result.finalFusedSelection?.file_name || "-")),
+            e("div", { className: "muted" }, "relative_match_score: " + fmt(result.finalFusedSelection?.relative_match_score)),
+            e("div", { className: "muted" }, "normalized_relevance_score: " + fmt(result.finalFusedSelection?.normalized_relevance_score)),
+            e("div", { className: "muted" }, "ranking_confidence_score: " + fmt(result.finalFusedSelection?.ranking_confidence_score)),
+            e("div", { className: "muted" }, "preview: " + (result.finalFusedSelection?.preview || "-")),
             e("div", { className: "muted" }, "BM25 + MiniLM + E5 정규화 및 adaptive 가중치 기반 단일 결과")
           ),
-          e("div", { className: "card" },
+          debug ? e("div", { className: "card" },
             e(MetricCards, { title: "현재 질의 기준 Fused 성능 요약", data: result.fusedCurrentMetrics }),
             e("div", { style: { height: "12px" } }),
             e(MetricCards, { title: "전체 데이터셋 기준 Fused 누적 성능 요약", data: result.fusedGlobalMetrics })
-          ),
+          ) : null,
           e(DataTable, { title: "Fused Top-K 결과", table: result.tables?.fused }),
           e(DataTable, { title: "Explainability / Fusion Weights", table: result.fusedExplainability }),
           debug ? e("div", null,
+            e("div", { className: "card" },
+              e("h3", null, "평가 상태 (Debug 전용)"),
+              e("div", { className: "muted" }, result.relevantSummary || ""),
+              e("div", { className: "muted" }, result.evaluationStatus?.message || ""),
+              e("div", { className: "muted" }, "has_ground_truth: " + String(result.evaluationStatus?.has_ground_truth))
+            ),
             e(DataTable, { title: "BM25 (Debug)", table: result.tables?.keyword }),
             e(DataTable, { title: "MiniLM (Debug)", table: result.tables?.denseA }),
             e(DataTable, { title: "E5 (Debug)", table: result.tables?.denseB })
