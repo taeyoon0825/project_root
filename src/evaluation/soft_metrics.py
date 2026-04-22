@@ -6,16 +6,17 @@ from typing import Any
 
 import pandas as pd
 
+from src.adaptive.tuning_config import load_tuning_config
+
 
 TOKEN_RE = re.compile(r"[0-9A-Za-z\uac00-\ud7a3]+")
-FALLBACK_SOFT_ACCURACY_WEIGHTS = {
-    "exact_match": 0.50,
-    "search_score": 0.30,
-    "text_overlap": 0.15,
-    "rank_weight": 0.05,
-}
-FALLBACK_SOFT_PRECISION_EXACT_WEIGHT = 0.70
-FALLBACK_SOFT_RECALL_EXACT_WEIGHT = 0.70
+_TUNE = load_tuning_config().get("soft_metrics", {})
+FALLBACK_SOFT_ACCURACY_WEIGHTS = _TUNE.get(
+    "fallback_soft_accuracy_weights",
+    {"exact_match": 0.25, "search_score": 0.25, "text_overlap": 0.25, "rank_weight": 0.25},
+)
+FALLBACK_SOFT_PRECISION_EXACT_WEIGHT = float(_TUNE.get("fallback_soft_precision_exact_weight", 0.5) or 0.5)
+FALLBACK_SOFT_RECALL_EXACT_WEIGHT = float(_TUNE.get("fallback_soft_recall_exact_weight", 0.5) or 0.5)
 
 
 def _get(row: Mapping[str, Any] | pd.Series, key: str, default: Any = "") -> Any:

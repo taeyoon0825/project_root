@@ -14,6 +14,7 @@ from src.adaptive.parameter_resolver import (
     resolve_query_search_config,
     resolve_top_k,
 )
+from src.adaptive.query_features import extract_query_features
 from src.config import DEFAULT_METADATA_CSV, EMBEDDINGS_DIR, INDICES_DIR, ensure_project_dirs
 from src.data.metadata_schema import ensure_metadata_columns, load_metadata_frame
 from src.embedding.vector_models import EmbeddingModelWrapper, list_available_models
@@ -21,8 +22,11 @@ from src.search.explainability import explain_frame
 from src.search.match_locator import locate_best_dense_match
 from src.search.text_source import (
     DEFAULT_TEXT_SOURCE,
+    DEFAULT_DENSE_NORMALIZATION_MODE,
     build_preview_text,
     build_search_text,
+    prepare_query_for_dense,
+    resolve_dense_normalization_mode,
     resolve_primary_text,
     text_source_suffix,
 )
@@ -51,6 +55,7 @@ class DenseSearchEngine:
         text_source: str = DEFAULT_TEXT_SOURCE,
         artifact_namespace: str | None = None,
         adaptive_context: AdaptiveContext | None = None,
+        dense_normalization_mode: str | None = None,
     ):
         self.model_alias = model_alias
         self.text_source = text_source
@@ -62,8 +67,13 @@ class DenseSearchEngine:
         self.index_summary_path = INDICES_DIR / f"{self._artifact_stem}_index_summary.json"
         self.wrapper = EmbeddingModelWrapper(model_alias)
         self.device = resolve_torch_device()
-        self._set_metadata(metadata)
         self.adaptive_context = adaptive_context
+        self.normalization_resources = adaptive_context.normalization if adaptive_context is not None else None
+        self.dense_normalization_mode = resolve_dense_normalization_mode(
+            dense_normalization_mode,
+            resources=self.normalization_resources,
+        )
+        self._set_metadata(metadata)
         self.embeddings: np.ndarray | None = None
         self.index = None
 
@@ -74,9 +84,15 @@ class DenseSearchEngine:
             axis=1,
         )
         frame["search_text"] = frame.apply(
-            lambda row: build_search_text(row, text_source=self.text_source),
-            axis=1,
-        )
+                lambda row: build_search_text(
+                    row,
+                    text_source=self.text_source,
+                    for_dense=True,
+                    normalization_mode=self.dense_normalization_mode,
+                    resources=self.normalization_resources,
+                ),
+                axis=1,
+            )
         self.metadata = frame
         self.document_texts = self.metadata["search_text"].astype(str).tolist()
 
@@ -89,6 +105,12 @@ class DenseSearchEngine:
                 embeddings=self.embeddings,
                 artifact_namespace=self.artifact_namespace,
             )
+            self.normalization_resources = self.adaptive_context.normalization
+            self.dense_normalization_mode = resolve_dense_normalization_mode(
+                self.dense_normalization_mode,
+                resources=self.normalization_resources,
+            )
+            self._set_metadata(self.metadata)
 
     def _artifact_alignment_status(
         self,
@@ -114,7 +136,13 @@ class DenseSearchEngine:
             stored_search_text = stored["search_text"].fillna("").astype(str).tolist()
         else:
             stored_search_text = stored.apply(
-                lambda row: build_search_text(row, text_source=self.text_source),
+                lambda row: build_search_text(
+                    row,
+                    text_source=self.text_source,
+                    for_dense=True,
+                    normalization_mode=self.dense_normalization_mode,
+                    resources=self.normalization_resources,
+                ),
                 axis=1,
             ).astype(str).tolist()
         current_search_text = current["search_text"].fillna("").astype(str).tolist()
@@ -133,7 +161,13 @@ class DenseSearchEngine:
         if "search_text" in normalized.columns:
             return normalized["search_text"].fillna("").astype(str).tolist()
         return normalized.apply(
-            lambda row: build_search_text(row, text_source=self.text_source),
+            lambda row: build_search_text(
+                row,
+                text_source=self.text_source,
+                for_dense=True,
+                normalization_mode=self.dense_normalization_mode,
+                resources=self.normalization_resources,
+            ),
             axis=1,
         ).astype(str).tolist()
 
@@ -150,7 +184,12 @@ class DenseSearchEngine:
 
         stored_search_texts = self._search_texts_for_frame(stored)
         current_prefix_search_texts = current.iloc[: len(stored)].apply(
-            lambda row: build_search_text(row, text_source=self.text_source),
+            lambda row: build_search_text(
+                row,
+                text_source=self.text_source,
+                for_dense=True,
+                normalization_mode=self.dense_normalization_mode,
+            ),
             axis=1,
         ).astype(str).tolist()
         if current_prefix_search_texts != stored_search_texts:
@@ -252,12 +291,8 @@ class DenseSearchEngine:
                         build_mode="no_update",
                     )
                     return
-
-                appended_metadata = self._append_candidates(stored_metadata)
-                if appended_metadata is not None and not appended_metadata.empty:
-                    self._append_artifacts(stored_embeddings, ensure_metadata_columns(stored_metadata), appended_metadata)
-                    return
-
+                # Enforce full rebuild when stale is detected.
+                # Partial append can keep stale ordering/doc alignment across artifacts.
         self._write_full_artifacts(build_mode="full_rebuild")
 
     def load(self, rebuild_if_missing: bool = True, rebuild_if_mismatch: bool = True) -> None:
@@ -305,7 +340,34 @@ class DenseSearchEngine:
                 f"for namespace={self.artifact_namespace or 'default'}"
             )
 
-        query_embedding = self.encode_query(query)
+        query_features = extract_query_features(
+            query,
+            self.adaptive_context.profile,
+            self.normalization_resources,
+            self.adaptive_context.performance,
+        )
+        adaptive_query_mode = self.dense_normalization_mode
+        adaptive_score = float(
+            np.mean(
+                [
+                    query_features.question_likeness,
+                    query_features.spoken_style,
+                    query_features.stt_noise_score,
+                    query_features.reranker_value_signal,
+                    self.normalization_resources.normalization_preference,
+                ]
+            )
+        )
+        baseline_score = float(np.mean([query_features.lexical_precision, self.adaptive_context.profile.stt_quality_score]))
+        if adaptive_score >= baseline_score:
+            adaptive_query_mode = "adaptive_corpus"
+
+        dense_query = prepare_query_for_dense(
+            query,
+            mode=adaptive_query_mode,
+            resources=self.normalization_resources,
+        )
+        query_embedding = self.encode_query(dense_query)
         if self.device.startswith("cuda"):
             with torch.inference_mode():
                 emb_t = torch.from_numpy(self.embeddings).to(self.device, non_blocking=True)
@@ -343,6 +405,10 @@ class DenseSearchEngine:
         result_frame["adaptive_semantic_weight"] = query_config.dense_semantic_weight
         result_frame["adaptive_preview_length"] = query_config.preview_length
         result_frame["adaptive_reason"] = query_config.reasoning
+        result_frame["dense_normalization_mode"] = self.dense_normalization_mode
+        result_frame["query_normalization_mode"] = adaptive_query_mode
+        result_frame["used_fallback_tuning"] = int(bool(self.adaptive_context.tuning_status.get("used_safe_fallback", False)))
+        result_frame["fallback_reason"] = str(self.adaptive_context.tuning_status.get("fallback_reason", ""))
         result_frame["inference_device"] = self.device
         result_frame["raw_score_explanation"] = (
             f"field_weights={query_config.field_weights}; "

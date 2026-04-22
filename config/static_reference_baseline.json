@@ -1,0 +1,53 @@
+{
+  "search": {
+    "field_weights": {
+      "title": 5.0,
+      "tags": 4.0,
+      "description": 3.0,
+      "transcript": 2.0
+    },
+    "field_weight_total": 14.0,
+    "keyword_alpha": 0.5,
+    "dense_alpha": 0.5,
+    "keyword_ranker_weight": 3.0,
+    "dense_semantic_weight": 5.0,
+    "reasoning": "reference-only static baseline mirroring the pre-adaptive experiment defaults"
+  },
+  "language": {
+    "dominant_language": "ko",
+    "whisper_language": "ko",
+    "whisper_model": "base",
+    "tts_provider": "edge",
+    "edge_voice": "ko-KR-SunHiNeural",
+    "gtts_lang": "ko",
+    "sample_rate": 16000,
+    "reasoning": "reference-only static baseline for comparison"
+  },
+  "metric": {
+    "hallucination_threshold": 75.0,
+    "soft_accuracy_weights": {
+      "exact_match": 0.5,
+      "search_score": 0.3,
+      "text_overlap": 0.15,
+      "rank_weight": 0.05
+    },
+    "soft_precision_exact_weight": 0.7,
+    "soft_recall_exact_weight": 0.7,
+    "reasoning": "reference-only static baseline for comparison"
+  },
+  "cluster": {
+    "n_clusters": 6,
+    "min_cluster_size": 4,
+    "preferred_method": "kmeans",
+    "candidate_scores": [],
+    "reasoning": "reference-only static baseline for comparison"
+  },
+  "visualization": {
+    "tsne_perplexity": 30.0,
+    "umap_n_neighbors": 15,
+    "umap_min_dist": 0.1,
+    "preview_length": 160,
+    "random_seed": 42,
+    "reasoning": "reference-only static baseline for comparison"
+  }
+}

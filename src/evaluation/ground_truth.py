@@ -82,6 +82,9 @@ def resolve_relevant_ids(query_row: pd.Series, metadata: pd.DataFrame) -> set[st
     filtered = metadata.copy()
     target_category = str(query_row.get("target_category", "")).strip()
     target_source_type = str(query_row.get("target_source_type", "")).strip()
+    if not target_category and not target_source_type:
+        # For ad-hoc/manual queries without explicit labels, do not fabricate ground truth.
+        return set()
     if target_category:
         filtered = filtered.loc[filtered["category"].astype(str) == target_category]
     if target_source_type:

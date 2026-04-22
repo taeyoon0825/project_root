@@ -2,30 +2,23 @@ from __future__ import annotations
 
 import json
 import math
-import re
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
-from src.adaptive.dataset_profile import ClusterProfile, DatasetProfile, build_dataset_profile
-from src.config import ADAPTIVE_DIR
+from src.adaptive.dataset_profile import DatasetProfile, build_dataset_profile
+from src.adaptive.normalization_resources import NormalizationResources, build_normalization_resources
+from src.adaptive.performance_profile import PerformanceProfile, load_recent_performance_profile
+from src.adaptive.query_features import QueryFeatureVector, extract_query_features
+from src.adaptive.tuning_config import load_tuning_status
+from src.config import ADAPTIVE_DIR, STATIC_REFERENCE_BASELINE_JSON
 from src.search.text_source import DEFAULT_TEXT_SOURCE
 from src.utils.io_utils import save_json
 
 
-FIELD_BOUNDS = {
-    "title": (0.10, 0.50),
-    "tags": (0.10, 0.40),
-    "description": (0.10, 0.40),
-    "transcript": (0.10, 0.60),
-}
-PREVIEW_BOUNDS = (80, 240)
-TOP_K_BOUNDS = (3, 15)
-CLUSTER_BOUNDS = (2, 12)
 REPRODUCIBILITY_SEED = 42
-QUESTION_RE = re.compile(r"\?$|what|why|how|who|where|when|which|설명|알려|무엇|왜|어떻게|누가|어디|언제", re.IGNORECASE)
 
 
 @dataclass
@@ -52,7 +45,8 @@ class QueryAdaptiveConfig:
     dense_semantic_weight: float
     preview_length: int
     recommended_top_k: int
-    reasoning: str
+    feature_vector: dict[str, Any] = field(default_factory=dict)
+    reasoning: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,6 +112,9 @@ class AdaptiveContext:
     metric: MetricConfig
     cluster: ClusterConfig
     visualization: VisualizationConfig
+    performance: PerformanceProfile
+    normalization: NormalizationResources
+    tuning_status: dict[str, Any]
     text_source: str = DEFAULT_TEXT_SOURCE
     artifact_namespace: str | None = None
 
@@ -129,159 +126,102 @@ class AdaptiveContext:
             "metric": self.metric.to_dict(),
             "cluster": self.cluster.to_dict(),
             "visualization": self.visualization.to_dict(),
+            "performance": self.performance.to_dict(),
+            "normalization": self.normalization.to_dict(),
+            "tuning_status": self.tuning_status,
             "text_source": self.text_source,
             "artifact_namespace": self.artifact_namespace,
         }
 
 
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(upper, float(value)))
+def _clip(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return float(max(lower, min(upper, value)))
 
 
-def _waterfill_normalize(values: dict[str, float], bounds: dict[str, tuple[float, float]]) -> dict[str, float]:
-    remaining = set(values)
-    result = {key: 0.0 for key in values}
-    target_total = 1.0
-    raw = values.copy()
-
-    while remaining:
-        raw_total = sum(max(raw[key], 0.0) for key in remaining)
-        if raw_total <= 0:
-            share = target_total / max(1, len(remaining))
-            for key in list(remaining):
-                lower, upper = bounds[key]
-                value = _clamp(share, lower, upper)
-                result[key] = value
-                target_total -= value
-                remaining.remove(key)
-            break
-
-        adjusted = False
-        for key in list(remaining):
-            lower, upper = bounds[key]
-            proposal = target_total * (max(raw[key], 0.0) / raw_total)
-            if proposal < lower:
-                result[key] = lower
-                target_total -= lower
-                remaining.remove(key)
-                adjusted = True
-            elif proposal > upper:
-                result[key] = upper
-                target_total -= upper
-                remaining.remove(key)
-                adjusted = True
-        if not adjusted:
-            for key in list(remaining):
-                raw_total = sum(max(raw[item], 0.0) for item in remaining)
-                result[key] = target_total * (max(raw[key], 0.0) / max(raw_total, 1e-9))
-            break
-
-    total = sum(result.values())
-    if total <= 0:
-        midpoint = {key: (bounds[key][0] + bounds[key][1]) / 2.0 for key in bounds}
-        total = sum(midpoint.values()) or 1.0
-        return {key: value / total for key, value in midpoint.items()}
-    return {key: value / total for key, value in result.items()}
-
-
-def _normalize_pair(keyword_alpha: float, dense_alpha: float) -> tuple[float, float]:
-    keyword_alpha = _clamp(keyword_alpha, 0.2, 0.8)
-    dense_alpha = _clamp(dense_alpha, 0.2, 0.8)
-    total = keyword_alpha + dense_alpha
-    if total <= 0:
-        return 0.5, 0.5
-    keyword_alpha = keyword_alpha / total
-    dense_alpha = dense_alpha / total
-    keyword_alpha = _clamp(keyword_alpha, 0.2, 0.8)
-    dense_alpha = _clamp(dense_alpha, 0.2, 0.8)
-    total = keyword_alpha + dense_alpha
-    return keyword_alpha / total, dense_alpha / total
-
-
-def _query_features(query: str) -> dict[str, float]:
-    tokens = re.findall(r"[0-9A-Za-z\uac00-\ud7a3]+", str(query or ""))
-    token_count = len(tokens)
-    numeric_ratio = sum(1 for token in tokens if any(char.isdigit() for char in token)) / max(1, token_count)
-    short_keyword = 1.0 if 0 < token_count <= 3 else 0.0
-    long_query = 1.0 if token_count >= 8 else 0.0
-    question_like = 1.0 if QUESTION_RE.search(str(query or "")) else 0.0
-    lexical_exactness = _clamp((short_keyword * 0.6) + (numeric_ratio * 0.4), 0.0, 1.0)
-    semantic_need = _clamp((long_query * 0.5) + (question_like * 0.5), 0.0, 1.0)
-    return {
-        "token_count": float(token_count),
-        "numeric_ratio": numeric_ratio,
-        "short_keyword": short_keyword,
-        "long_query": long_query,
-        "question_like": question_like,
-        "lexical_exactness": lexical_exactness,
-        "semantic_need": semantic_need,
-    }
+def _normalize_weights(values: dict[str, float]) -> dict[str, float]:
+    clean = {key: max(0.0, float(value)) for key, value in values.items()}
+    total = sum(clean.values())
+    if total <= 0.0:
+        uniform = 1.0 / max(1, len(clean))
+        return {key: uniform for key in clean}
+    return {key: value / total for key, value in clean.items()}
 
 
 def _score_margin(scores: np.ndarray | list[float] | None) -> float:
-    if scores is None:
-        return 0.0
-    values = np.asarray(scores, dtype=np.float32)
+    values = np.asarray(scores if scores is not None else [], dtype=np.float32)
+    values = values[np.isfinite(values)]
     if values.size == 0:
         return 0.0
-    sorted_values = np.sort(values)
-    top1 = float(sorted_values[-1])
-    pivot = float(sorted_values[max(0, len(sorted_values) - min(5, len(sorted_values)))])
-    return _clamp(top1 - pivot, 0.0, 1.0)
+    ordered = np.sort(values)
+    top1 = float(ordered[-1])
+    topn_index = max(0, len(ordered) - min(5, len(ordered)))
+    pivot = float(ordered[topn_index])
+    span = abs(top1) + abs(pivot) + 1e-9
+    return _clip((top1 - pivot) / span)
 
 
-def resolve_search_weights(profile: DatasetProfile) -> SearchWeightConfig:
-    raw_field_scores: dict[str, float] = {}
-    for field in FIELD_BOUNDS:
-        raw_field_scores[field] = (
-            (0.35 * profile.field_query_overlap.get(field, 0.0))
-            + (0.25 * (1.0 - profile.field_missing_rates.get(field, 1.0)))
-            + (0.20 * profile.field_information_density.get(field, 0.0))
-            + (0.20 * profile.field_retrieval_gain.get(field, 0.0))
+def resolve_search_weights(profile: DatasetProfile, performance: PerformanceProfile | None = None) -> SearchWeightConfig:
+    performance = performance or PerformanceProfile()
+    field_scores = {
+        field: float(
+            np.mean(
+                [
+                    profile.field_query_overlap.get(field, 0.0),
+                    1.0 - profile.field_missing_rates.get(field, 1.0),
+                    profile.field_information_density.get(field, 0.0),
+                    profile.field_retrieval_gain.get(field, 0.0),
+                    profile.lexical_field_quality.get(field, 0.0),
+                ]
+            )
         )
+        for field in profile.field_query_overlap
+    }
+    normalized_fields = _normalize_weights(field_scores)
+    field_weight_total = float(
+        1.0
+        + math.log1p(max(1, profile.document_count))
+        * np.mean(
+            [
+                profile.exact_match_ratio,
+                profile.query_document_overlap,
+                profile.corpus_token_coverage,
+                1.0 - profile.field_missing_rates.get("transcript", 1.0),
+            ]
+        )
+    )
 
-    normalized = _waterfill_normalize(raw_field_scores, FIELD_BOUNDS)
-    field_weight_total = _clamp(
-        2.0
-        + (1.8 * profile.exact_match_ratio)
-        + (1.2 * profile.query_document_overlap)
-        + (1.0 * (1.0 - profile.field_missing_rates.get("transcript", 1.0)))
-        + (0.8 * math.log1p(profile.avg_query_length + 1.0)),
-        2.0,
-        8.0,
+    lexical_signal = float(
+        np.mean(
+            [
+                profile.exact_match_ratio,
+                profile.query_document_overlap,
+                np.mean(list(profile.lexical_field_quality.values()) or [0.0]),
+                profile.corpus_token_coverage,
+            ]
+        )
     )
-    absolute_weights = {field: normalized[field] * field_weight_total for field in normalized}
-
-    lexical_signal = _clamp(
-        (0.45 * profile.exact_match_ratio)
-        + (0.35 * profile.query_document_overlap)
-        + (0.20 * max(profile.field_query_overlap.values(), default=0.0)),
-        0.0,
-        1.0,
+    semantic_signal = float(
+        np.mean(
+            [
+                profile.semantic_need_score,
+                1.0 - profile.stt_quality_score,
+                profile.embedding_profile.dense_separation_score if profile.embedding_profile else 0.0,
+                performance.reranker_value_prior,
+            ]
+        )
     )
-    semantic_signal = _clamp(
-        (0.45 * profile.semantic_need_score)
-        + (0.25 * (1.0 - profile.stt_quality_score))
-        + (0.30 * (profile.embedding_profile.dense_separation_score if profile.embedding_profile else 0.5)),
-        0.0,
-        1.0,
-    )
-    keyword_alpha, dense_alpha = _normalize_pair(
-        0.35 + (0.65 * lexical_signal) - (0.20 * semantic_signal),
-        0.35 + (0.65 * semantic_signal) - (0.10 * lexical_signal),
-    )
-    keyword_ranker_weight = _clamp(1.0 + (4.5 * keyword_alpha) + (1.2 * lexical_signal), 1.0, 6.0)
-    dense_semantic_weight = _clamp(1.0 + (4.5 * dense_alpha) + (1.2 * semantic_signal), 1.0, 6.5)
+    alpha_pair = _normalize_weights({"keyword": lexical_signal, "dense": semantic_signal})
+    keyword_alpha = alpha_pair["keyword"]
+    dense_alpha = alpha_pair["dense"]
+    corpus_scale = math.log1p(max(1, profile.document_count))
+    keyword_ranker_weight = 1.0 + (corpus_scale * keyword_alpha)
+    dense_semantic_weight = 1.0 + (corpus_scale * dense_alpha)
     reasoning = (
-        f"field_weights derived from overlap={json.dumps(profile.field_query_overlap, ensure_ascii=False)}, "
-        f"coverage={json.dumps({k: 1.0 - v for k, v in profile.field_missing_rates.items()}, ensure_ascii=False)}, "
-        f"information_density={json.dumps(profile.field_information_density, ensure_ascii=False)}, "
-        f"retrieval_gain={json.dumps(profile.field_retrieval_gain, ensure_ascii=False)}; "
-        f"keyword_alpha={keyword_alpha:.3f}, dense_alpha={dense_alpha:.3f}, "
-        f"stt_quality={profile.stt_quality_score:.3f}, semantic_need={profile.semantic_need_score:.3f}"
+        f"field_scores={json.dumps(field_scores, ensure_ascii=False)}, lexical_signal={lexical_signal:.3f}, "
+        f"semantic_signal={semantic_signal:.3f}, performance_prior={performance.reranker_value_prior:.3f}"
     )
     return SearchWeightConfig(
-        field_weights=absolute_weights,
+        field_weights={field: normalized_fields[field] * field_weight_total for field in normalized_fields},
         field_weight_total=field_weight_total,
         keyword_alpha=keyword_alpha,
         dense_alpha=dense_alpha,
@@ -301,71 +241,121 @@ def resolve_query_search_config(
     if isinstance(context, AdaptiveContext):
         profile = context.profile
         base = context.search
-        base_visualization = context.visualization
+        visualization = context.visualization
+        normalization = context.normalization
+        performance = context.performance
     else:
         profile = context
-        base = resolve_search_weights(profile)
-        base_visualization = resolve_visualization_config(profile)
+        performance = load_recent_performance_profile()
+        normalization = build_normalization_resources(
+            metadata=pd.DataFrame(),
+            queryset=None,
+            stt_quality_score=profile.stt_quality_score,
+            corpus_token_coverage=profile.corpus_token_coverage,
+        )
+        base = resolve_search_weights(profile, performance)
+        visualization = resolve_visualization_config(profile)
 
-    features = _query_features(query)
+    features = extract_query_features(query, profile, normalization, performance)
     keyword_margin = _score_margin(keyword_scores)
     dense_margin = _score_margin(dense_scores)
 
-    keyword_alpha = base.keyword_alpha
-    keyword_alpha += 0.18 * features["short_keyword"]
-    keyword_alpha += 0.12 * features["numeric_ratio"]
-    keyword_alpha += 0.12 * keyword_margin
-    keyword_alpha -= 0.16 * features["question_like"]
-    keyword_alpha -= 0.12 * features["long_query"]
-    keyword_alpha -= 0.10 * (1.0 - profile.stt_quality_score)
+    keyword_signal = float(
+        np.mean(
+            [
+                base.keyword_alpha,
+                features.lexical_precision,
+                1.0 - features.semantic_need,
+                keyword_margin,
+                features.exact_affinity,
+            ]
+        )
+    )
+    dense_signal = float(
+        np.mean(
+            [
+                base.dense_alpha,
+                features.semantic_need,
+                features.question_likeness,
+                features.spoken_style,
+                dense_margin,
+                features.paraphrase_affinity,
+                features.natural_affinity,
+                features.stt_affinity,
+                features.reranker_value_signal,
+            ]
+        )
+    )
+    alpha_pair = _normalize_weights({"keyword": keyword_signal, "dense": dense_signal})
+    keyword_alpha = alpha_pair["keyword"]
+    dense_alpha = alpha_pair["dense"]
 
-    dense_alpha = base.dense_alpha
-    dense_alpha += 0.18 * features["question_like"]
-    dense_alpha += 0.14 * features["long_query"]
-    dense_alpha += 0.12 * dense_margin
-    dense_alpha += 0.10 * (1.0 - profile.stt_quality_score)
-    dense_alpha -= 0.10 * features["short_keyword"]
-
-    keyword_alpha, dense_alpha = _normalize_pair(keyword_alpha, dense_alpha)
-
-    normalized_fields = {
-        field: weight / max(base.field_weight_total, 1e-9)
-        for field, weight in base.field_weights.items()
+    base_normalized = _normalize_weights(base.field_weights)
+    field_bias = {
+        "title": float(
+            np.mean(
+                [
+                    profile.field_query_overlap.get("title", 0.0),
+                    profile.lexical_field_quality.get("title", 0.0),
+                    features.lexical_precision,
+                    features.named_entity_score,
+                ]
+            )
+        ),
+        "tags": float(
+            np.mean(
+                [
+                    profile.field_query_overlap.get("tags", 0.0),
+                    profile.lexical_field_quality.get("tags", 0.0),
+                    features.lexical_precision,
+                    features.numeric_salience,
+                ]
+            )
+        ),
+        "description": float(
+            np.mean(
+                [
+                    profile.field_query_overlap.get("description", 0.0),
+                    profile.lexical_field_quality.get("description", 0.0),
+                    features.question_likeness,
+                    features.semantic_need,
+                ]
+            )
+        ),
+        "transcript": float(
+            np.mean(
+                [
+                    profile.field_query_overlap.get("transcript", 0.0),
+                    profile.lexical_field_quality.get("transcript", 0.0),
+                    features.spoken_style,
+                    features.semantic_need,
+                    features.stt_noise_score,
+                ]
+            )
+        ),
     }
-    if features["short_keyword"] or features["numeric_ratio"] > 0.0:
-        normalized_fields["title"] += 0.05
-        normalized_fields["tags"] += 0.05
-        normalized_fields["transcript"] -= 0.04
-        normalized_fields["description"] -= 0.03
-    if features["question_like"] or features["long_query"]:
-        normalized_fields["transcript"] += 0.08
-        normalized_fields["description"] += 0.04
-        normalized_fields["title"] -= 0.05
-        normalized_fields["tags"] -= 0.03
-    normalized_fields = _waterfill_normalize(normalized_fields, FIELD_BOUNDS)
+    raw_field_weights = {
+        field: base_normalized.get(field, 0.0) * max(1e-9, field_bias.get(field, 0.0))
+        for field in base_normalized
+    }
+    normalized_fields = _normalize_weights(raw_field_weights)
     field_weights = {field: normalized_fields[field] * base.field_weight_total for field in normalized_fields}
 
-    keyword_ranker_weight = _clamp(
-        base.keyword_ranker_weight * (0.70 + (0.60 * keyword_alpha) + (0.20 * keyword_margin)),
-        0.8,
-        6.0,
-    )
-    dense_semantic_weight = _clamp(
-        base.dense_semantic_weight * (0.70 + (0.60 * dense_alpha) + (0.20 * dense_margin)),
-        0.8,
-        6.5,
+    corpus_scale = math.log1p(max(1, profile.document_count))
+    keyword_ranker_weight = 1.0 + corpus_scale * float(np.mean([keyword_alpha, features.lexical_precision, keyword_margin]))
+    dense_semantic_weight = 1.0 + corpus_scale * float(
+        np.mean([dense_alpha, features.semantic_need, features.reranker_value_signal, dense_margin])
     )
 
     preview_length = resolve_preview_length(
         profile,
         query=query,
         search_mode="dense" if dense_alpha >= keyword_alpha else "keyword",
-        ui_width_chars=base_visualization.preview_length,
+        ui_width_chars=visualization.preview_length,
     )
-    recommended_top_k = resolve_top_k(profile)
+    recommended_top_k = resolve_top_k(profile, query_features=features)
     reasoning = (
-        f"query_tokens={int(features['token_count'])}, question_like={features['question_like']:.2f}, "
-        f"numeric_ratio={features['numeric_ratio']:.2f}, keyword_margin={keyword_margin:.3f}, dense_margin={dense_margin:.3f}, "
+        f"{features.reasoning}, keyword_margin={keyword_margin:.3f}, dense_margin={dense_margin:.3f}, "
         f"keyword_alpha={keyword_alpha:.3f}, dense_alpha={dense_alpha:.3f}"
     )
     return QueryAdaptiveConfig(
@@ -377,37 +367,35 @@ def resolve_query_search_config(
         dense_semantic_weight=dense_semantic_weight,
         preview_length=preview_length,
         recommended_top_k=recommended_top_k,
+        feature_vector=features.to_dict(),
         reasoning=reasoning,
     )
 
 
 def resolve_language_config(profile: DatasetProfile) -> LanguageConfig:
     dominant = profile.dominant_language
-    language_map = {
-        "ko": ("ko", "ko-KR-SunHiNeural", "ko"),
-        "en": ("en", "en-US-AriaNeural", "en"),
-        "mixed": (None, "en-US-AriaNeural", "en"),
-        "unknown": (None, "en-US-AriaNeural", "en"),
-    }
-    whisper_language, edge_voice, gtts_lang = language_map.get(dominant, (None, "en-US-AriaNeural", "en"))
-    duration = profile.audio_profile.avg_duration_seconds
-    if dominant == "mixed" or duration >= 240 or profile.stt_quality_score < 0.55:
-        whisper_model = "small"
-    elif duration >= 60 or profile.document_count >= 40:
-        whisper_model = "base"
+    if dominant == "ko":
+        whisper_language, edge_voice, gtts_lang = "ko", "ko-KR-SunHiNeural", "ko"
+    elif dominant == "en":
+        whisper_language, edge_voice, gtts_lang = "en", "en-US-AriaNeural", "en"
+    else:
+        whisper_language, edge_voice, gtts_lang = None, "en-US-AriaNeural", "en"
+
+    audio_signals = [
+        profile.audio_profile.avg_duration_seconds / max(1.0, profile.audio_profile.avg_duration_seconds + 60.0),
+        1.0 - profile.stt_quality_score,
+        profile.document_count / max(1.0, profile.document_count + 24.0),
+    ]
+    whisper_complexity = float(np.mean(audio_signals))
+    if whisper_complexity >= np.mean(audio_signals):
+        whisper_model = "base" if whisper_complexity < 0.6 else "small"
     else:
         whisper_model = "tiny"
 
-    sample_rate = profile.audio_profile.sample_rate_mode or 0
-    if sample_rate <= 0:
-        resolved_sample_rate = None
-    else:
-        resolved_sample_rate = int(sample_rate)
-
+    resolved_sample_rate = int(profile.audio_profile.sample_rate_mode) if profile.audio_profile.sample_rate_mode > 0 else None
     reasoning = (
-        f"dominant_language={dominant}, ratios={json.dumps(profile.language_ratios, ensure_ascii=False)}, "
-        f"avg_audio_duration={duration:.2f}, stt_quality={profile.stt_quality_score:.3f}, "
-        f"sample_rate_mode={profile.audio_profile.sample_rate_mode}"
+        f"dominant_language={dominant}, stt_quality={profile.stt_quality_score:.3f}, "
+        f"avg_audio_duration={profile.audio_profile.avg_duration_seconds:.2f}"
     )
     return LanguageConfig(
         dominant_language=dominant,
@@ -424,70 +412,61 @@ def resolve_language_config(profile: DatasetProfile) -> LanguageConfig:
 def resolve_metric_config(
     profile: DatasetProfile,
     score_values: list[float] | np.ndarray | None = None,
+    performance: PerformanceProfile | None = None,
 ) -> MetricConfig:
-    if score_values is not None:
-        values = np.asarray(score_values, dtype=np.float32)
-        values = values[np.isfinite(values)]
-    else:
-        values = np.asarray([], dtype=np.float32)
-
-    base_threshold = _clamp(
-        55.0
-        + (15.0 * profile.exact_match_ratio)
-        + (12.0 * profile.query_document_overlap)
-        + (10.0 * profile.stt_quality_score)
-        - (8.0 * profile.semantic_need_score),
-        55.0,
-        92.0,
-    )
+    performance = performance or PerformanceProfile()
+    values = np.asarray(score_values if score_values is not None else [], dtype=np.float32)
+    values = values[np.isfinite(values)]
+    distribution_threshold = 0.0
     if values.size:
         median_score = float(np.median(values))
-        q1 = float(np.quantile(values, 0.25))
-        q3 = float(np.quantile(values, 0.75))
-        mad = float(np.median(np.abs(values - median_score)))
-        distribution_threshold = max(q3, median_score + (1.3 * mad))
-        threshold = _clamp((0.45 * base_threshold) + (0.55 * distribution_threshold), 55.0, 95.0)
+        upper_score = float(np.quantile(values, 0.75))
+        distribution_threshold = max(median_score, upper_score)
+    profile_threshold = 100.0 * float(
+        np.mean(
+            [
+                profile.exact_match_ratio,
+                profile.query_document_overlap,
+                profile.stt_quality_score,
+                1.0 - profile.semantic_need_score,
+            ]
+        )
+    )
+    if distribution_threshold > 0.0:
+        threshold = float(np.mean([profile_threshold, distribution_threshold]))
     else:
-        threshold = base_threshold
+        threshold = profile_threshold
 
-    exact_raw = 0.30 + (0.40 * profile.exact_match_ratio) + (0.10 * profile.query_document_overlap)
-    search_raw = 0.25 + (0.35 * (profile.embedding_profile.dense_separation_score if profile.embedding_profile else 0.5))
-    overlap_raw = 0.20 + (0.30 * profile.query_document_overlap) + (0.15 * profile.stt_quality_score)
-    rank_raw = 0.05 + (0.10 / max(1.0, math.log1p(profile.document_count + 1.0)))
-    soft_weights = _waterfill_normalize(
+    soft_weights = _normalize_weights(
         {
-            "exact_match": exact_raw,
-            "search_score": search_raw,
-            "text_overlap": overlap_raw,
-            "rank_weight": rank_raw,
-        },
-        {
-            "exact_match": (0.25, 0.60),
-            "search_score": (0.15, 0.45),
-            "text_overlap": (0.10, 0.35),
-            "rank_weight": (0.03, 0.15),
-        },
+            "exact_match": float(np.mean([profile.exact_match_ratio, 1.0 - profile.semantic_need_score])),
+            "search_score": float(
+                np.mean(
+                    [
+                        profile.embedding_profile.dense_separation_score if profile.embedding_profile else 0.0,
+                        performance.overall_semantic_success_rate,
+                    ]
+                )
+            ),
+            "text_overlap": float(np.mean([profile.query_document_overlap, profile.stt_quality_score])),
+            "rank_weight": float(np.mean([1.0 / max(1.0, math.log1p(profile.document_count + 1.0)), performance.reranker_value_prior])),
+        }
     )
-    soft_precision_exact_weight = _clamp(
-        0.45 + (0.30 * profile.exact_match_ratio) - (0.15 * (1.0 - profile.stt_quality_score)),
-        0.40,
-        0.85,
+    exact_weight_signal = float(np.mean([soft_weights["exact_match"], profile.exact_match_ratio]))
+    precision_exact_weight = exact_weight_signal / max(
+        exact_weight_signal + soft_weights["search_score"] + soft_weights["text_overlap"],
+        1e-9,
     )
-    soft_recall_exact_weight = _clamp(
-        0.45 + (0.25 * profile.exact_match_ratio) - (0.10 * profile.semantic_need_score),
-        0.40,
-        0.85,
-    )
+    recall_exact_weight = exact_weight_signal / max(exact_weight_signal + soft_weights["text_overlap"], 1e-9)
     reasoning = (
-        f"threshold={threshold:.2f} from base={base_threshold:.2f}, "
-        f"exact_match_ratio={profile.exact_match_ratio:.3f}, query_overlap={profile.query_document_overlap:.3f}, "
-        f"stt_quality={profile.stt_quality_score:.3f}, semantic_need={profile.semantic_need_score:.3f}"
+        f"threshold={threshold:.2f}, weights={json.dumps(soft_weights, ensure_ascii=False)}, "
+        f"performance_success={performance.overall_semantic_success_rate:.3f}"
     )
     return MetricConfig(
         hallucination_threshold=threshold,
         soft_accuracy_weights=soft_weights,
-        soft_precision_exact_weight=soft_precision_exact_weight,
-        soft_recall_exact_weight=soft_recall_exact_weight,
+        soft_precision_exact_weight=precision_exact_weight,
+        soft_recall_exact_weight=recall_exact_weight,
         reasoning=reasoning,
     )
 
@@ -495,22 +474,13 @@ def resolve_metric_config(
 def resolve_cluster_config(profile: DatasetProfile, embeddings: np.ndarray | None = None) -> ClusterConfig:
     candidate_scores = profile.cluster_profile.candidate_scores if profile.cluster_profile else []
     recommended_k = profile.cluster_profile.recommended_k if profile.cluster_profile else 0
-    max_k = max(CLUSTER_BOUNDS[0], min(CLUSTER_BOUNDS[1], int(math.sqrt(max(1, profile.document_count))) + max(1, profile.category_count // 2)))
     if recommended_k <= 0:
-        recommended_k = _clamp(max(profile.category_count, 2), CLUSTER_BOUNDS[0], max_k)
-    recommended_k = int(_clamp(recommended_k, CLUSTER_BOUNDS[0], min(max_k, max(1, profile.document_count))))
-    if profile.document_count < 4:
-        recommended_k = max(1, min(profile.document_count, recommended_k))
-    min_cluster_size = int(
-        _clamp(
-            2 + round(math.sqrt(max(1, profile.document_count)) / 2.0),
-            2,
-            max(2, min(8, profile.document_count)),
-        )
-    )
+        base_scale = math.sqrt(max(1, profile.document_count)) + math.log1p(max(1, profile.category_count))
+        recommended_k = max(1, int(round(min(profile.document_count, base_scale))))
+    min_cluster_size = max(1, int(round(math.sqrt(max(1, profile.document_count)))))
     preferred_method = "hdbscan" if (profile.cluster_profile and profile.cluster_profile.density_label == "dense") else "kmeans"
     reasoning = (
-        f"recommended_k={recommended_k}, category_count={profile.category_count}, document_count={profile.document_count}, "
+        f"recommended_k={recommended_k}, min_cluster_size={min_cluster_size}, "
         f"density={profile.cluster_profile.density_label if profile.cluster_profile else 'unknown'}"
     )
     return ClusterConfig(
@@ -524,14 +494,14 @@ def resolve_cluster_config(profile: DatasetProfile, embeddings: np.ndarray | Non
 
 def resolve_visualization_config(profile: DatasetProfile, embeddings: np.ndarray | None = None) -> VisualizationConfig:
     sample_count = max(2, profile.document_count)
-    density_bonus = 0.1 if profile.cluster_profile and profile.cluster_profile.density_label == "dense" else 0.0
-    tsne_perplexity = _clamp(min(45.0, max(5.0, math.sqrt(sample_count) * (1.5 + density_bonus))), 5.0, max(5.0, sample_count - 1.0))
-    umap_n_neighbors = int(_clamp(round(math.sqrt(sample_count) * (1.4 + density_bonus)), 5, min(60, sample_count - 1)))
-    umap_min_dist = _clamp(0.05 + (0.35 * profile.semantic_need_score) + (0.15 * (1.0 - profile.exact_match_ratio)), 0.05, 0.70)
+    density_factor = 1.0 + float(profile.cluster_profile.density_label == "dense") if profile.cluster_profile else 1.0
+    tsne_perplexity = max(2.0, min(float(sample_count - 1), math.sqrt(sample_count) * density_factor))
+    umap_n_neighbors = max(2, min(sample_count - 1, int(round(math.sqrt(sample_count) * density_factor))))
+    umap_min_dist = float(np.mean([profile.semantic_need_score, 1.0 - profile.exact_match_ratio]))
     preview_length = resolve_preview_length(profile, search_mode="generic")
     reasoning = (
         f"tsne_perplexity={tsne_perplexity:.1f}, umap_n_neighbors={umap_n_neighbors}, "
-        f"umap_min_dist={umap_min_dist:.2f}, document_count={profile.document_count}"
+        f"umap_min_dist={umap_min_dist:.2f}"
     )
     return VisualizationConfig(
         tsne_perplexity=tsne_perplexity,
@@ -551,34 +521,32 @@ def resolve_preview_length(
     search_mode: str = "generic",
     ui_width_chars: int | None = None,
 ) -> int:
-    query_len = len(re.findall(r"[0-9A-Za-z\uac00-\ud7a3]+", str(query or "")))
-    text_len = len(str(text or ""))
-    sentence_hint = profile.avg_document_length / max(1.0, profile.avg_sentence_count) if profile.avg_sentence_count else 120.0
-    base = 90.0 + (0.35 * min(sentence_hint, 160.0)) + (6.0 * query_len)
-    if search_mode == "dense":
-        base += 20.0
-    elif search_mode == "keyword":
-        base -= 5.0
+    query_token_count = len([token for token in str(query or "").split() if token.strip()])
+    sentence_hint = profile.avg_document_length / max(1.0, profile.avg_sentence_count) if profile.avg_sentence_count else 0.0
+    text_len = len(str(text or "").strip())
+    mode_multiplier = {"keyword": 0.9, "generic": 1.0, "dense": 1.1}.get(search_mode, 1.0)
+    base = (sentence_hint + (query_token_count * max(1.0, profile.avg_query_length or 1.0))) * mode_multiplier
+    if ui_width_chars is not None:
+        base = min(base or ui_width_chars, float(ui_width_chars))
     if text_len:
-        base = min(base, max(PREVIEW_BOUNDS[0], min(PREVIEW_BOUNDS[1], text_len)))
-    if ui_width_chars:
-        base = min(base, float(ui_width_chars))
-    return int(round(_clamp(base, PREVIEW_BOUNDS[0], PREVIEW_BOUNDS[1])))
+        base = min(base or text_len, float(text_len))
+    if base <= 0:
+        base = max(64.0, profile.avg_document_length / max(1.0, profile.avg_sentence_count or 1.0))
+    return int(max(48, round(base)))
 
 
-def resolve_top_k(profile: DatasetProfile, requested_top_k: int | None = None) -> int:
-    adaptive_top_k = int(
-        round(
-            _clamp(
-                math.sqrt(max(1.0, profile.document_count)) + math.log1p(max(1, profile.category_count)),
-                TOP_K_BOUNDS[0],
-                TOP_K_BOUNDS[1],
-            )
-        )
-    )
+def resolve_top_k(
+    profile: DatasetProfile,
+    requested_top_k: int | None = None,
+    *,
+    query_features: QueryFeatureVector | None = None,
+) -> int:
+    base = math.sqrt(max(1, profile.document_count)) + math.log1p(max(1, profile.category_count + profile.query_count))
+    pressure = query_features.candidate_pressure if query_features is not None else profile.semantic_need_score
+    adaptive_top_k = max(1, int(round(min(profile.document_count, base * (1.0 + pressure)))))
     if requested_top_k is None:
         return adaptive_top_k
-    return int(_clamp(requested_top_k, 1, 50))
+    return max(1, min(profile.document_count, int(requested_top_k)))
 
 
 def _save_context(context: AdaptiveContext) -> None:
@@ -587,6 +555,36 @@ def _save_context(context: AdaptiveContext) -> None:
     ADAPTIVE_DIR.mkdir(parents=True, exist_ok=True)
     path = ADAPTIVE_DIR / f"{context.artifact_namespace}__adaptive_context.json"
     save_json(path, context.to_dict())
+
+
+def _resolve_effective_normalization_mode(
+    profile: DatasetProfile,
+    performance: PerformanceProfile,
+    normalization: NormalizationResources,
+) -> str:
+    adaptive_score = float(
+        np.mean(
+            [
+                normalization.normalization_preference,
+                1.0 - profile.stt_quality_score,
+                max(0.0, performance.bucket("natural_question").delta_semantic_success_rate),
+                max(0.0, performance.bucket("stt_style").delta_semantic_success_rate),
+                performance.reranker_value_prior,
+            ]
+        )
+    )
+    baseline_score = float(
+        np.mean(
+            [
+                1.0 - normalization.normalization_preference,
+                profile.stt_quality_score,
+                performance.overall_semantic_success_rate,
+                profile.corpus_token_coverage,
+            ]
+        )
+    )
+    normalization.recommended_mode = "adaptive_corpus" if adaptive_score >= baseline_score else "baseline"
+    return normalization.recommended_mode
 
 
 def build_static_reference_context(
@@ -605,57 +603,35 @@ def build_static_reference_context(
         embedding_model_alias=embedding_model_alias,
         embeddings=embeddings,
     )
+    baseline = {}
+    if STATIC_REFERENCE_BASELINE_JSON.exists():
+        try:
+            baseline = json.loads(STATIC_REFERENCE_BASELINE_JSON.read_text(encoding="utf-8"))
+        except Exception:
+            baseline = {}
+    performance = load_recent_performance_profile()
+    normalization = build_normalization_resources(
+        metadata,
+        queryset,
+        stt_quality_score=profile.stt_quality_score,
+        corpus_token_coverage=profile.corpus_token_coverage,
+    )
+    _resolve_effective_normalization_mode(profile, performance, normalization)
     search = SearchWeightConfig(
-        field_weights={
-            "title": 5.0,
-            "tags": 4.0,
-            "description": 3.0,
-            "transcript": 2.0,
-        },
-        field_weight_total=14.0,
-        keyword_alpha=0.50,
-        dense_alpha=0.50,
-        keyword_ranker_weight=3.0,
-        dense_semantic_weight=5.0,
-        reasoning="reference-only static baseline mirroring the pre-adaptive experiment defaults",
+        field_weights=baseline.get("search", {}).get("field_weights", resolve_search_weights(profile, performance).field_weights),
+        field_weight_total=float(
+            baseline.get("search", {}).get("field_weight_total", resolve_search_weights(profile, performance).field_weight_total)
+        ),
+        keyword_alpha=float(baseline.get("search", {}).get("keyword_alpha", 0.5)),
+        dense_alpha=float(baseline.get("search", {}).get("dense_alpha", 0.5)),
+        keyword_ranker_weight=float(baseline.get("search", {}).get("keyword_ranker_weight", 1.0)),
+        dense_semantic_weight=float(baseline.get("search", {}).get("dense_semantic_weight", 1.0)),
+        reasoning=str(baseline.get("search", {}).get("reasoning", "reference-only static baseline")),
     )
-    language = LanguageConfig(
-        dominant_language="ko",
-        whisper_language="ko",
-        whisper_model="base",
-        tts_provider="edge",
-        edge_voice="ko-KR-SunHiNeural",
-        gtts_lang="ko",
-        sample_rate=16000,
-        reasoning="reference-only static baseline for comparison",
-    )
-    metric = MetricConfig(
-        hallucination_threshold=75.0,
-        soft_accuracy_weights={
-            "exact_match": 0.50,
-            "search_score": 0.30,
-            "text_overlap": 0.15,
-            "rank_weight": 0.05,
-        },
-        soft_precision_exact_weight=0.70,
-        soft_recall_exact_weight=0.70,
-        reasoning="reference-only static baseline for comparison",
-    )
-    cluster = ClusterConfig(
-        n_clusters=6,
-        min_cluster_size=4,
-        preferred_method="kmeans",
-        candidate_scores=[],
-        reasoning="reference-only static baseline for comparison",
-    )
-    visualization = VisualizationConfig(
-        tsne_perplexity=30.0,
-        umap_n_neighbors=15,
-        umap_min_dist=0.10,
-        preview_length=160,
-        random_seed=REPRODUCIBILITY_SEED,
-        reasoning="reference-only static baseline for comparison",
-    )
+    language = resolve_language_config(profile)
+    metric = resolve_metric_config(profile, performance=performance)
+    cluster = resolve_cluster_config(profile, embeddings=embeddings)
+    visualization = resolve_visualization_config(profile, embeddings=embeddings)
     return AdaptiveContext(
         profile=profile,
         search=search,
@@ -663,6 +639,9 @@ def build_static_reference_context(
         metric=metric,
         cluster=cluster,
         visualization=visualization,
+        performance=performance,
+        normalization=normalization,
+        tuning_status=load_tuning_status(),
         text_source=text_source,
         artifact_namespace=artifact_namespace,
     )
@@ -684,9 +663,17 @@ def build_adaptive_context(
         embedding_model_alias=embedding_model_alias,
         embeddings=embeddings,
     )
-    search = resolve_search_weights(profile)
+    performance = load_recent_performance_profile()
+    normalization = build_normalization_resources(
+        metadata,
+        queryset,
+        stt_quality_score=profile.stt_quality_score,
+        corpus_token_coverage=profile.corpus_token_coverage,
+    )
+    _resolve_effective_normalization_mode(profile, performance, normalization)
+    search = resolve_search_weights(profile, performance)
     language = resolve_language_config(profile)
-    metric = resolve_metric_config(profile)
+    metric = resolve_metric_config(profile, performance=performance)
     cluster = resolve_cluster_config(profile, embeddings=embeddings)
     visualization = resolve_visualization_config(profile, embeddings=embeddings)
     context = AdaptiveContext(
@@ -696,6 +683,9 @@ def build_adaptive_context(
         metric=metric,
         cluster=cluster,
         visualization=visualization,
+        performance=performance,
+        normalization=normalization,
+        tuning_status=load_tuning_status(),
         text_source=text_source,
         artifact_namespace=artifact_namespace,
     )

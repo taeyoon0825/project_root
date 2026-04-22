@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.config import AUDIO_STT_DIR, DEFAULT_METADATA_CSV, STT_CSV_DIR, WHISPER_CACHE_DIR, ensure_project_dirs
 from src.data.metadata_schema import load_metadata_frame, save_metadata_frame
-from src.utils.device import resolve_stt_device
+from src.utils.device import resolve_stt_device, stt_gpu_required
 from src.utils.io_utils import save_json
 
 try:
@@ -134,7 +134,7 @@ def transcribe_audio_batch(
     device = resolve_stt_device()
     _safe_print(f"[STT] dedicated device={device}")
     model = whisper.load_model(resolved_model_name, download_root=str(WHISPER_CACHE_DIR), device=device)
-    if not str(device).startswith("cuda"):
+    if stt_gpu_required() and not str(device).startswith("cuda"):
         raise RuntimeError(f"STT requires CUDA-only execution, but resolved device={device!r}.")
     total = len(candidate_indices)
 

@@ -6,17 +6,50 @@ import numpy as np
 
 from src.config import EMBEDDING_MODELS, HF_CACHE_DIR, OPTIONAL_MODELS
 from src.utils.device import resolve_torch_device
+from src.utils.hf_cache import resolve_local_hf_snapshot
 
 os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
 os.environ.setdefault("HF_HUB_CACHE", str(HF_CACHE_DIR / "hub"))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_CACHE_DIR / "transformers"))
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 from sentence_transformers import SentenceTransformer
+from transformers.utils import logging as transformers_logging
+
+try:
+    from huggingface_hub.utils import disable_progress_bars as hf_disable_progress_bars
+except Exception:  # pragma: no cover
+    hf_disable_progress_bars = None
+
+transformers_logging.set_verbosity_error()
+if hf_disable_progress_bars is not None:
+    hf_disable_progress_bars()
 
 
 MODEL_CATALOG = {**EMBEDDING_MODELS, **OPTIONAL_MODELS}
+
+
+def _load_sentence_transformer(model_name: str, device: str) -> SentenceTransformer:
+    local_snapshot = resolve_local_hf_snapshot(model_name)
+    try:
+        return SentenceTransformer(
+            local_snapshot or model_name,
+            cache_folder=str(HF_CACHE_DIR),
+            device=device,
+            local_files_only=True,
+        )
+    except Exception:
+        return SentenceTransformer(
+            model_name,
+            cache_folder=str(HF_CACHE_DIR),
+            device=device,
+        )
 
 
 def list_available_models(include_optional: bool = False) -> dict[str, str]:
@@ -41,11 +74,7 @@ class EmbeddingModelWrapper:
         self.model_name = MODEL_CATALOG[model_alias]
         self.device = resolve_torch_device()
         if self.model_name not in self._MODEL_CACHE:
-            self._MODEL_CACHE[self.model_name] = SentenceTransformer(
-                self.model_name,
-                cache_folder=str(HF_CACHE_DIR),
-                device=self.device,
-            )
+            self._MODEL_CACHE[self.model_name] = _load_sentence_transformer(self.model_name, self.device)
         self.model = self._MODEL_CACHE[self.model_name]
 
     def _prepare_texts(self, texts: list[str], is_query: bool) -> list[str]:

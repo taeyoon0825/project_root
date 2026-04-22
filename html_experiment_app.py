@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import pandas as pd
 import plotly
 import plotly.io as pio
@@ -29,6 +30,7 @@ from src.adaptive.parameter_resolver import (
 from src.config import (
     CLUSTERS_DIR,
     DEFAULT_QUERYSET_CSV,
+    EMBEDDINGS_DIR,
     HTML_UPLOAD_MEDIA_DIR,
     HTML_UPLOAD_TRANSCRIPTS_DIR,
     HTML_UPLOAD_WAV_DIR,
@@ -73,6 +75,12 @@ from src.visualize.interactive_plot import (
 )
 from src.visualize.pca_plot import build_projection_artifacts
 
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 HTML_PATH = ROOT_DIR / "web" / "experiment_dashboard.html"
@@ -112,6 +120,55 @@ SEARCH_TABLE_COLUMNS = [
 ]
 SUPPORTED_UPLOAD_EXTENSIONS = {".mp4", ".wav"}
 UPLOAD_SOURCE_TYPE = "local_media"
+
+
+class SearchPreparationError(ValueError):
+    pass
+
+
+class ModelLoadError(RuntimeError):
+    pass
+
+
+def _manual_query_row(query_text: str) -> pd.Series:
+    normalized = str(query_text or "").strip()
+    return pd.Series(
+        {
+            "query_id": "manual_query",
+            "query": normalized,
+            "query_preview": truncate_text(normalized, 80),
+            "target_category": "",
+            "target_source_type": "",
+            "relevant_ids": "",
+            "relevant_file_names": "",
+            "relevant_line_numbers": "",
+            "relevant_segment_indexes": "",
+            "relevant_segment_texts": "",
+            "relevant_count": 0,
+            "evaluation_level": "file",
+            "ground_truth_rule": "manual_query_no_ground_truth",
+        }
+    )
+
+
+def _is_auto_probe_query(query_row: pd.Series) -> bool:
+    query_id = str(query_row.get("query_id", "")).strip().lower()
+    rule = str(query_row.get("ground_truth_rule", "")).strip().lower()
+    if query_id.startswith("probe_"):
+        return True
+    auto_tokens = [
+        "derived_from_metadata_token_match",
+        "derived_from_exact_phrase_match",
+        "derived_from_all_query_tokens",
+        "manual_query_no_ground_truth",
+    ]
+    return any(token in rule for token in auto_tokens)
+
+
+def _evaluation_catalog(catalog: pd.DataFrame) -> pd.DataFrame:
+    if catalog.empty:
+        return catalog
+    return catalog.loc[~catalog.apply(_is_auto_probe_query, axis=1)].reset_index(drop=True)
 
 
 def truncate_text(text: Any, length: int = 96) -> str:
@@ -289,6 +346,7 @@ def annotate_search_results(
     hallucination_threshold: float | None = DEFAULT_HALLUCINATION_THRESHOLD,
 ) -> tuple[pd.DataFrame, set[str]]:
     relevant_ids = resolve_relevant_ids(query_row, metadata)
+    has_ground_truth = bool(relevant_ids)
     query_text = str(query_row.get("query", "")).strip()
     metadata_lookup = (
         metadata.copy()
@@ -325,10 +383,10 @@ def annotate_search_results(
             )
         is_relevant = str(getattr(row, "id", "")) in relevant_ids
         hits += int(is_relevant)
-        precision = hits / rank
-        recall = hits / max(1, len(relevant_ids))
-        accuracy = 1.0 if rank == 1 and is_relevant else 0.0
-        f1 = f1_score(precision, recall)
+        precision = (hits / rank) if has_ground_truth else 0.0
+        recall = (hits / max(1, len(relevant_ids))) if has_ground_truth else 0.0
+        accuracy = (1.0 if rank == 1 and is_relevant else 0.0) if has_ground_truth else 0.0
+        f1 = f1_score(precision, recall) if has_ground_truth else 0.0
         similarity = float(getattr(row, "similarity_score", 0.0) or 0.0)
         threshold_used = hallucination_threshold if hallucination_threshold is not None else DEFAULT_HALLUCINATION_THRESHOLD
         hallucination = bool((not is_relevant) and similarity >= threshold_used)
@@ -343,6 +401,7 @@ def annotate_search_results(
                 "f1_score": f1,
                 "hallucination_flag": "YES" if hallucination else "NO",
                 "hallucination_threshold_used": threshold_used,
+                "has_ground_truth": has_ground_truth,
                 "search_location": resolve_location_display(row_map),
                 "query_preview": query_preview,
             }
@@ -353,11 +412,33 @@ def annotate_search_results(
 def build_query_summary(system_name: str, annotated: pd.DataFrame, relevant_ids: set[str], top_k: int) -> dict[str, Any]:
     hits = int(annotated["is_relevant"].sum()) if not annotated.empty else 0
     predicted_count = len(annotated)
-    precision = hits / max(1, predicted_count)
-    recall = hits / max(1, len(relevant_ids))
-    accuracy = float(bool(not annotated.empty and bool(annotated.iloc[0]["is_relevant"])))
-    f1 = f1_score(precision, recall)
+    has_ground_truth = bool(relevant_ids)
+    precision = (hits / max(1, predicted_count)) if has_ground_truth else 0.0
+    recall = (hits / max(1, len(relevant_ids))) if has_ground_truth else 0.0
+    accuracy = float(bool(not annotated.empty and bool(annotated.iloc[0]["is_relevant"]))) if has_ground_truth else 0.0
+    f1 = f1_score(precision, recall) if has_ground_truth else 0.0
     hallucination_count = int((annotated["hallucination_flag"] == "YES").sum()) if not annotated.empty else 0
+    reciprocal_rank = 0.0
+    binary_relevance: list[int] = []
+    for rank, is_relevant in enumerate(annotated.get("is_relevant", pd.Series(dtype=bool)).tolist(), start=1):
+        relevance = int(bool(is_relevant))
+        binary_relevance.append(relevance)
+        if reciprocal_rank == 0.0 and relevance:
+            reciprocal_rank = 1.0 / rank
+
+    def _dcg(relevances: list[int]) -> float:
+        total = 0.0
+        for rank, relevance in enumerate(relevances, start=1):
+            total += float(relevance) / math.log2(rank + 1.0)
+        return total
+
+    ideal_relevance = [1] * min(len(relevant_ids), len(binary_relevance))
+    ndcg = 0.0
+    if binary_relevance:
+        ideal_dcg = _dcg(ideal_relevance)
+        ndcg = 0.0 if ideal_dcg == 0 else _dcg(binary_relevance) / ideal_dcg
+    topk_hit_rate = float(hits > 0) if has_ground_truth else 0.0
+
     return {
         "system_name": system_name,
         "relevant_count": len(relevant_ids),
@@ -367,11 +448,23 @@ def build_query_summary(system_name: str, annotated: pd.DataFrame, relevant_ids:
         f"recall@{top_k}": recall,
         f"f1@{top_k}": f1,
         "accuracy@1_reference": accuracy,
-        "metric_definition": "precision/recall/f1 are calculated from retrieved ids and ground truth relevant ids; accuracy is only a top-1 reference.",
+        "metric_definition": (
+            "precision/recall/f1 are calculated from retrieved ids and ground truth relevant ids; accuracy is only a top-1 reference."
+            if has_ground_truth
+            else "no explicit ground truth mapped for this query; quality metrics are not reliable."
+        ),
+        "has_ground_truth": has_ground_truth,
         "hallucination_count": hallucination_count,
         "hallucination_rate": hallucination_count / max(1, predicted_count),
         "mean_final_score": float(annotated["final_score"].mean()) if "final_score" in annotated.columns and not annotated.empty else 0.0,
         "mean_similarity_score": float(annotated["similarity_score"].mean()) if not annotated.empty else 0.0,
+        "accuracy_at_1": accuracy,
+        "precision_at_k": precision,
+        "recall_at_k": recall,
+        "f1_at_k": f1,
+        "mrr_at_k": reciprocal_rank,
+        "ndcg_at_k": ndcg,
+        "topk_hit_rate": topk_hit_rate,
     }
 
 
@@ -484,6 +577,53 @@ def ensure_artifacts(
             except Exception:
                 if cluster_method != "kmeans":
                     pass
+
+
+def _validate_fused_search_artifacts(
+    metadata: pd.DataFrame,
+    artifact_namespace: str,
+    text_source: str,
+    model_aliases: list[str],
+) -> dict[str, Any]:
+    counts: dict[str, Any] = {
+        "metadata_rows": int(len(metadata)),
+        "searchable_primary_rows": int(
+            metadata.apply(lambda row: bool(str(resolve_primary_text(row, text_source=text_source)).strip()), axis=1).sum()
+        ),
+    }
+    metadata_ids = metadata["id"].fillna("").astype(str).tolist()
+    if counts["metadata_rows"] == 0:
+        raise SearchPreparationError("no metadata rows available for fused search")
+
+    if counts["searchable_primary_rows"] == 0:
+        raise SearchPreparationError("missing searchable transcript for uploaded files")
+
+    for model_alias in model_aliases:
+        stem = artifact_stem(model_alias, text_source, artifact_namespace)
+        emb_path = EMBEDDINGS_DIR / f"{stem}_embeddings.npy"
+        dense_meta_path = EMBEDDINGS_DIR / f"{stem}_metadata.csv"
+        if not emb_path.exists():
+            raise SearchPreparationError(f"missing embedding artifact: {emb_path}")
+        if not dense_meta_path.exists():
+            raise SearchPreparationError(f"missing embedding metadata artifact: {dense_meta_path}")
+        emb_rows = int(np.load(emb_path).shape[0])
+        dense_meta = load_metadata_frame(dense_meta_path)
+        dense_ids = dense_meta["id"].fillna("").astype(str).tolist()
+        counts[f"{model_alias}_embedding_rows"] = emb_rows
+        counts[f"{model_alias}_dense_metadata_rows"] = int(len(dense_meta))
+        if emb_rows != len(metadata):
+            raise SearchPreparationError(
+                f"embedding/metadata row mismatch after rebuild: model={model_alias}, "
+                f"embedding rows={emb_rows}, metadata rows={len(metadata)}"
+            )
+        if len(dense_meta) != len(metadata):
+            raise SearchPreparationError(
+                f"dense metadata row mismatch after rebuild: model={model_alias}, "
+                f"dense metadata rows={len(dense_meta)}, metadata rows={len(metadata)}"
+            )
+        if dense_ids != metadata_ids:
+            raise SearchPreparationError(f"doc_id alignment failed during fused search preparation: model={model_alias}")
+    return counts
 
 
 def evaluation_text_sources(metadata: pd.DataFrame) -> tuple[str, ...]:
@@ -783,7 +923,7 @@ def _selected_query_row(
 ) -> pd.Series:
     query_text = str(query or "").strip()
     if catalog.empty:
-        row = build_metadata_token_query_row(query_text or "유튜브 전사 검색", metadata, text_source=text_source)
+        row = _manual_query_row(query_text or "유튜브 전사 검색")
     else:
         exact_query = (
             catalog.loc[catalog["query"].fillna("").astype(str).str.strip() == query_text]
@@ -796,7 +936,7 @@ def _selected_query_row(
         elif not matched.empty and (not query_text or query_text == str(matched.iloc[0].get("query", "")).strip()):
             row = matched.iloc[0].copy()
         elif query_text:
-            row = build_metadata_token_query_row(query_text, metadata, text_source=text_source)
+            row = _manual_query_row(query_text)
         else:
             row = matched.iloc[0].copy() if not matched.empty else catalog.iloc[0].copy()
     row["query_preview"] = truncate_text(row.get("query", ""), 80)
@@ -879,15 +1019,39 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         elif not ui_catalog["query_id"].fillna("").astype(str).eq(str(query_row.get("query_id", ""))).any():
             ui_catalog = pd.concat([selected_query_frame, ui_catalog], ignore_index=True)
 
-    ensure_artifacts(
-        metadata,
-        artifact_namespace,
-        text_source,
-        [model_a, model_b],
-        cluster_method,
-        n_clusters=None,
-        adaptive_context=adaptive_context,
-    )
+    try:
+        ensure_artifacts(
+            metadata,
+            artifact_namespace,
+            text_source,
+            [model_a, model_b],
+            cluster_method,
+            n_clusters=None,
+            adaptive_context=adaptive_context,
+        )
+        artifact_checks = _validate_fused_search_artifacts(
+            metadata,
+            artifact_namespace=artifact_namespace,
+            text_source=text_source,
+            model_aliases=[model_a, model_b],
+        )
+    except SearchPreparationError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "errorCode": "FUSED_SEARCH_PREPARATION_FAILED",
+            "artifactNamespace": artifact_namespace,
+            "device": device_payload(),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "Dense model loading failed during progress/stderr handling",
+            "errorCode": "MODEL_LOAD_FAILED",
+            "detail": str(exc),
+            "artifactNamespace": artifact_namespace,
+            "device": device_payload(),
+        }
     dense_context_a = build_adaptive_context(
         metadata,
         catalog,
@@ -1006,7 +1170,8 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
     summary = pd.DataFrame(summary_rows)
     fused_current = summary.loc[summary["system_name"] == "fused-retrieval"].head(1)
 
-    ensure_evaluation_artifacts(metadata, catalog, artifact_namespace, top_k=top_k)
+    eval_catalog = _evaluation_catalog(catalog)
+    ensure_evaluation_artifacts(metadata, eval_catalog, artifact_namespace, top_k=top_k)
     eval_summary = _load_eval_frame("retrieval_eval_summary.csv", artifact_namespace)
     fused_eval = eval_summary.loc[eval_summary["system_name"] == "fused-retrieval"].head(1).copy() if not eval_summary.empty else pd.DataFrame()
     eval_detail = _load_eval_frame("retrieval_eval_detail.csv", artifact_namespace)
@@ -1045,7 +1210,22 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
                     "normalized_minilm",
                     "normalized_e5",
                     "fused_score",
+                    "reranker_score",
+                    "reranker_alpha",
+                    "rerank_anchor_overlap",
+                    "reranker_enabled",
+                    "dense_normalization_mode",
+                    "query_normalization_mode",
+                    "adaptive_candidate_pool_k",
+                    "adaptive_rerank_top_n",
+                    "adaptive_query_bucket",
+                    "adaptive_semantic_need",
+                    "adaptive_ambiguity",
+                    "adaptive_reranker_value",
                     "fusion_weights",
+                    "top_model_contribution",
+                    "used_fallback_tuning",
+                    "fallback_reason",
                     "chosen_preview_reason",
                     "ranking_reason",
                 ]
@@ -1075,6 +1255,7 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
             "resolvedTopK": top_k,
         },
         "device": device_payload(),
+        "artifactChecks": artifact_checks,
     }
 
 
@@ -1278,6 +1459,14 @@ def main() -> None:
 
     if not HTML_PATH.exists():
         raise FileNotFoundError(f"Missing HTML file: {HTML_PATH}")
+
+    try:
+        from huggingface_hub.utils import disable_progress_bars as hf_disable_progress_bars
+
+        hf_disable_progress_bars()
+    except Exception:
+        pass
+
     server = ThreadingHTTPServer((args.host, args.port), ExperimentHtmlHandler)
     print(f"HTML dashboard: http://{args.host}:{args.port}")
     server.serve_forever()

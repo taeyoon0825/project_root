@@ -1,0 +1,61 @@
+{
+  "fused": {
+    "hybrid_normalize": {
+      "minmax_weight": 0.7,
+      "rank_weight": 0.3
+    },
+    "semantic_push": {
+      "question_like_weight": 0.45,
+      "long_query_weight": 0.35,
+      "non_short_weight": 0.2,
+      "semantic_intent_weight": 0.6,
+      "profile_semantic_weight": 0.4,
+      "bm25_reduction_weight": 0.35,
+      "dense_bonus_weight": 0.12,
+      "bm25_penalty_weight": 0.05
+    },
+    "weight_floors": {
+      "bm25_min": 0.25,
+      "dense_min": 0.35
+    },
+    "semantic_title_bonus": {
+      "enabled": true,
+      "top_n": 3,
+      "title_overlap_weight": 0.12,
+      "keyword_overlap_weight": 0.08,
+      "apply_when_semantic_push_at_least": 0.3
+    },
+    "reranker": {
+      "enabled": true,
+      "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+      "top_n": 12,
+      "base_alpha": 0.28,
+      "semantic_alpha_boost": 0.24,
+      "question_alpha_boost": 0.18,
+      "long_query_alpha_boost": 0.10,
+      "spoken_query_alpha_boost": 0.08,
+      "disagreement_alpha_boost": 0.12,
+      "disagreement_margin_threshold": 0.08,
+      "max_alpha": 0.82,
+      "anchor_overlap_weight": 0.10,
+      "candidate_preview_chars": 320,
+      "matched_passage_count": 3,
+      "apply_when_semantic_push_at_least": 0.2
+    }
+  },
+  "soft_metrics": {
+    "fallback_soft_accuracy_weights": {
+      "exact_match": 0.5,
+      "search_score": 0.3,
+      "text_overlap": 0.15,
+      "rank_weight": 0.05
+    },
+    "fallback_soft_precision_exact_weight": 0.7,
+    "fallback_soft_recall_exact_weight": 0.7
+  },
+  "adaptive_bounds": {
+    "preview_bounds": [80, 240],
+    "top_k_bounds": [3, 15],
+    "cluster_bounds": [2, 12]
+  }
+}

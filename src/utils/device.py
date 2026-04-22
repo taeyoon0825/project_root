@@ -6,6 +6,10 @@ from typing import Any
 import torch
 
 
+def stt_gpu_required() -> bool:
+    return str(os.getenv("REQUIRE_GPU_FOR_STT", "true")).strip().lower() not in {"0", "false", "no"}
+
+
 def _cuda_index_from_device(device: str) -> int:
     if device == "cuda":
         return 0
@@ -27,7 +31,7 @@ def resolve_torch_device() -> str:
 
 
 def resolve_stt_device() -> str:
-    require_gpu = str(os.getenv("REQUIRE_GPU_FOR_STT", "true")).strip().lower() not in {"0", "false", "no"}
+    require_gpu = stt_gpu_required()
     forced = str(os.getenv("APP_STT_DEVICE", "")).strip().lower()
     index = str(os.getenv("APP_STT_CUDA_INDEX", os.getenv("APP_CUDA_INDEX", "0"))).strip()
     target = forced or f"cuda:{index}"
@@ -72,6 +76,7 @@ def device_payload() -> dict[str, Any]:
         "retrieval": retrieval_device,
         "stt": stt_device,
         "stt_error": stt_error,
+        "stt_gpu_required": stt_gpu_required(),
         "cuda_available": bool(torch.cuda.is_available()),
         "gpu_count": int(torch.cuda.device_count() if torch.cuda.is_available() else 0),
     }
