@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""밀집 검색용 임베딩 아티팩트를 생성하고 재사용하는 엔진.
+
+이 모듈은 메타데이터를 검색용 텍스트로 바꾸고, 임베딩을 만들고, FAISS 인덱스와
+요약 메타데이터를 저장하며, 질의 시점에는 같은 규칙으로 점수를 계산한다.
+인덱싱과 검색을 같은 모듈에 두는 이유는 아티팩트 정합성 규칙이 한곳에 있어야
+오래된 임베딩과 새 메타데이터가 조용히 섞이는 문제를 막을 수 있기 때문이다.
+"""
+
 import argparse
 import re
 from pathlib import Path
@@ -40,6 +48,7 @@ except ImportError:  # pragma: no cover
 
 
 def artifact_stem(model_alias: str, text_source: str, artifact_namespace: str | None = None) -> str:
+    """모델, 텍스트 소스, 네임스페이스를 합쳐 아티팩트 파일명 뼈대를 만든다."""
     base = f"{model_alias}__{text_source_suffix(text_source)}"
     if not artifact_namespace:
         return base
@@ -48,6 +57,8 @@ def artifact_stem(model_alias: str, text_source: str, artifact_namespace: str | 
 
 
 class DenseSearchEngine:
+    """임베딩 생성, 저장, 로딩, 질의 점수 계산을 함께 담당하는 밀집 검색 엔진."""
+
     def __init__(
         self,
         metadata: pd.DataFrame,
@@ -57,6 +68,7 @@ class DenseSearchEngine:
         adaptive_context: AdaptiveContext | None = None,
         dense_normalization_mode: str | None = None,
     ):
+        """아티팩트 경로와 모델 래퍼를 초기화하고 메타데이터를 검색 형태로 정리한다."""
         self.model_alias = model_alias
         self.text_source = text_source
         self.artifact_namespace = artifact_namespace
@@ -78,6 +90,7 @@ class DenseSearchEngine:
         self.index = None
 
     def _set_metadata(self, metadata: pd.DataFrame) -> None:
+        """메타데이터를 현재 검색 설정에 맞는 텍스트 컬럼 구조로 재구성한다."""
         frame = ensure_metadata_columns(metadata).reset_index(drop=True)
         frame["primary_text"] = frame.apply(
             lambda row: resolve_primary_text(row, text_source=self.text_source),
@@ -97,6 +110,7 @@ class DenseSearchEngine:
         self.document_texts = self.metadata["search_text"].astype(str).tolist()
 
     def _ensure_adaptive_context(self) -> None:
+        """적응형 컨텍스트가 없으면 현재 메타데이터와 임베딩 상태로 즉석 생성한다."""
         if self.adaptive_context is None:
             self.adaptive_context = build_adaptive_context(
                 self.metadata,
@@ -117,6 +131,11 @@ class DenseSearchEngine:
         embeddings: np.ndarray,
         stored_metadata: pd.DataFrame | None,
     ) -> tuple[bool, str]:
+        """저장된 임베딩/메타데이터 아티팩트가 현재 메타데이터와 정합적인지 검사한다.
+
+        길이, ID 순서, 검색 텍스트가 조금만 어긋나도 점수 해석이 깨지므로
+        느슨하게 넘어가지 않고 이유 문자열까지 함께 반환한다.
+        """
         current = self.metadata.reset_index(drop=True)
         if len(embeddings) != len(current):
             return False, f"embedding rows={len(embeddings)} / metadata rows={len(current)}"
@@ -152,11 +171,13 @@ class DenseSearchEngine:
         return True, ""
 
     def _load_stored_metadata(self) -> pd.DataFrame | None:
+        """저장된 문서 메타데이터 CSV가 있으면 읽어 온다."""
         if not self.doc_meta_path.exists():
             return None
         return load_metadata_frame(self.doc_meta_path)
 
     def _search_texts_for_frame(self, frame: pd.DataFrame) -> list[str]:
+        """프레임이 가진 검색 텍스트를 현재 규칙으로 재구성해 비교에 사용한다."""
         normalized = ensure_metadata_columns(frame).reset_index(drop=True)
         if "search_text" in normalized.columns:
             return normalized["search_text"].fillna("").astype(str).tolist()
@@ -172,6 +193,11 @@ class DenseSearchEngine:
         ).astype(str).tolist()
 
     def _append_candidates(self, stored_metadata: pd.DataFrame) -> pd.DataFrame | None:
+        """증분 추가가 안전한 경우에만 새로 붙은 행 집합을 계산한다.
+
+        순서나 기존 검색 텍스트가 어긋난 경우에는 append가 아니라 전체 재생성이
+        필요하므로 None을 돌려준다.
+        """
         stored = ensure_metadata_columns(stored_metadata).reset_index(drop=True)
         current = self.metadata.reset_index(drop=True)
         if len(current) < len(stored):
@@ -201,6 +227,7 @@ class DenseSearchEngine:
         return appended
 
     def _save_index_summary(self, document_count: int, index_saved: bool, build_mode: str) -> None:
+        """나중에 디버그와 감사가 가능하도록 인덱스 생성 요약 정보를 저장한다."""
         self._ensure_adaptive_context()
         save_json(
             self.index_summary_path,
@@ -223,6 +250,7 @@ class DenseSearchEngine:
         )
 
     def _write_full_artifacts(self, build_mode: str = "full_rebuild") -> None:
+        """임베딩과 인덱스를 처음부터 다시 생성해 전체 아티팩트를 갱신한다."""
         self.embeddings = self.wrapper.encode_documents(self.document_texts)
         save_numpy(self.embedding_path, self.embeddings)
         self.metadata.to_csv(self.doc_meta_path, index=False, encoding="utf-8-sig")
@@ -242,6 +270,7 @@ class DenseSearchEngine:
         stored_metadata: pd.DataFrame,
         appended_metadata: pd.DataFrame,
     ) -> None:
+        """저장된 임베딩 뒤에 안전하게 추가 가능한 새 행만 증분 반영한다."""
         appended_texts = appended_metadata["search_text"].fillna("").astype(str).tolist()
         appended_embeddings = self.wrapper.encode_documents(appended_texts)
         self.embeddings = np.vstack([stored_embeddings, appended_embeddings]).astype(np.float32)
@@ -274,6 +303,11 @@ class DenseSearchEngine:
         )
 
     def build(self, incremental: bool = True) -> None:
+        """현재 메타데이터 기준으로 밀집 검색 아티팩트를 준비한다.
+
+        가능하면 기존 아티팩트를 재사용하지만, 정합성이 조금이라도 깨졌다면
+        전체 재생성을 선택해 침묵하는 불일치를 막는다.
+        """
         ensure_project_dirs()
         self._set_metadata(self.metadata)
         if incremental and self.embedding_path.exists() and self.doc_meta_path.exists():
@@ -291,11 +325,12 @@ class DenseSearchEngine:
                         build_mode="no_update",
                     )
                     return
-                # Enforce full rebuild when stale is detected.
-                # Partial append can keep stale ordering/doc alignment across artifacts.
+                # 오래된 흔적이 보이면 부분 append보다 전체 재생성을 강제한다.
+                # 그렇지 않으면 아티팩트 간 문서 순서와 정렬 축이 틀어질 수 있다.
         self._write_full_artifacts(build_mode="full_rebuild")
 
     def load(self, rebuild_if_missing: bool = True, rebuild_if_mismatch: bool = True) -> None:
+        """저장된 임베딩/인덱스를 로드하고 필요하면 재생성한다."""
         if not self.embedding_path.exists():
             if rebuild_if_missing:
                 self.build()
@@ -327,9 +362,15 @@ class DenseSearchEngine:
             self.index = index
 
     def encode_query(self, query: str) -> np.ndarray:
+        """질의 하나를 현재 모델 규칙으로 임베딩한다."""
         return self.wrapper.encode_queries([query])[0]
 
     def score_all(self, query: str) -> pd.DataFrame:
+        """전체 문서에 대해 질의 점수를 계산하고 디버그 컬럼까지 붙여 반환한다.
+
+        이 함수는 검색 랭킹의 핵심 계산 경로다. 질의 정규화, 임베딩 유사도,
+        적응형 가중치, 설명 컬럼을 한 번에 조립한다.
+        """
         if self.embeddings is None or len(self.metadata) != len(self.embeddings):
             self.load()
         assert self.embeddings is not None
@@ -347,6 +388,8 @@ class DenseSearchEngine:
             self.adaptive_context.performance,
         )
         adaptive_query_mode = self.dense_normalization_mode
+        # 질의 특성이 STT 노이즈/구어체 쪽에 더 가깝다면
+        # 문서 정규화 리소스를 적극 반영하는 adaptive_corpus 모드로 전환한다.
         adaptive_score = float(
             np.mean(
                 [
@@ -369,6 +412,7 @@ class DenseSearchEngine:
         )
         query_embedding = self.encode_query(dense_query)
         if self.device.startswith("cuda"):
+            # GPU가 있으면 대규모 내적 계산을 torch로 수행해 점수 계산 비용을 줄인다.
             with torch.inference_mode():
                 emb_t = torch.from_numpy(self.embeddings).to(self.device, non_blocking=True)
                 query_t = torch.from_numpy(query_embedding).to(self.device, non_blocking=True)
@@ -394,6 +438,7 @@ class DenseSearchEngine:
             field_weights=query_config.field_weights,
         )
         result_frame["raw_score"] = result_frame["final_score"].astype(float)
+        # 최종 점수는 UI와 평가가 쓰기 쉬운 0..1, 0..100 표현도 함께 만든다.
         result_frame["normalized_score"] = _normalize_scores(result_frame["final_score"].to_numpy())
         result_frame["display_score"] = result_frame["normalized_score"] * 100.0
         result_frame["similarity_score"] = result_frame["display_score"]
@@ -427,6 +472,7 @@ class DenseSearchEngine:
         return result_frame.sort_values("final_score", ascending=False).reset_index(drop=True)
 
     def search(self, query: str, top_k: int | None = None) -> pd.DataFrame:
+        """전체 점수 계산 결과에서 상위 k개만 남기고 문장 anchor를 추가한다."""
         self._ensure_adaptive_context()
         top_k = resolve_top_k(self.adaptive_context.profile, top_k)
         result_frame = self.score_all(query).head(top_k).reset_index(drop=True)
@@ -491,6 +537,7 @@ class DenseSearchEngine:
 
 
 def _normalize_scores(scores: np.ndarray) -> np.ndarray:
+    """점수 벡터를 0..1로 정규화해 표시와 후속 결합에 재사용한다."""
     min_score = float(scores.min())
     max_score = float(scores.max())
     if abs(max_score - min_score) < 1e-12:
@@ -506,6 +553,7 @@ def build_all_indices(
     artifact_namespace: str | None = None,
     incremental: bool = True,
 ) -> list[tuple[str, str]]:
+    """지정한 데이터셋과 텍스트 소스 전부에 대해 밀집 인덱스를 생성한다."""
     ensure_project_dirs()
     metadata = load_metadata_frame(metadata_path)
     model_aliases = list(list_available_models(include_optional=include_optional).keys())
@@ -528,10 +576,12 @@ def load_index_summary(
     text_source: str = DEFAULT_TEXT_SOURCE,
     artifact_namespace: str | None = None,
 ) -> dict:
+    """저장된 밀집 인덱스 요약 JSON을 읽어 온다."""
     return load_json(INDICES_DIR / f"{artifact_stem(model_alias, text_source, artifact_namespace)}_index_summary.json")
 
 
 def main() -> None:
+    """밀집 인덱스를 생성하는 CLI 진입점."""
     parser = argparse.ArgumentParser(description="Build dense embedding indices.")
     parser.add_argument("--metadata-path", type=Path, default=DEFAULT_METADATA_CSV)
     parser.add_argument("--include-optional", action="store_true")

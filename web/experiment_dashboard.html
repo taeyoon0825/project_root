@@ -4,238 +4,590 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fused Retrieval Dashboard</title>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <link rel="icon" href="/web/favicon.svg" type="image/svg+xml">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background:#f6f7f8; color:#1f2528; }
-    .app { max-width: 1280px; margin: 0 auto; padding: 16px; }
-    .card { background:#fff; border:1px solid #d7dee2; border-radius:8px; padding:14px; margin-bottom:12px; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    input, button { padding:8px; border-radius:6px; border:1px solid #cdd5da; }
-    button { cursor:pointer; background:#0f766e; color:white; border-color:#0f766e; }
-    button.secondary { background:white; color:#0f766e; }
-    .metrics { display:grid; grid-template-columns: repeat(4,minmax(120px,1fr)); gap:8px; }
-    .metric { background:#fff; border:1px solid #d7dee2; border-radius:8px; padding:10px; }
-    .metric .k { color:#637078; font-size:12px; }
-    .metric .v { font-weight:700; font-size:18px; }
-    table { width:100%; border-collapse: collapse; font-size:13px; }
-    th, td { border-bottom:1px solid #e2e7ea; padding:6px; text-align:left; }
-    .muted { color:#637078; }
-    .status { margin:8px 0; }
+    :root {
+      --bg: #f3f5f7;
+      --panel: #ffffff;
+      --line: #d8e0e6;
+      --text: #1d2730;
+      --muted: #66737d;
+      --brand: #0f766e;
+      --brand-soft: #d9f3ef;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #f7fafb 0%, #eef3f6 100%);
+      color: var(--text);
+    }
+
+    .app {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 8px 24px rgba(23, 42, 58, 0.04);
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .hero h1,
+    .card h2,
+    .card h3 {
+      margin: 0 0 12px;
+    }
+
+    .hero p,
+    .muted {
+      color: var(--muted);
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    input,
+    button {
+      min-height: 42px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      font: inherit;
+    }
+
+    input[type="text"],
+    input[type="search"],
+    input[type="file"] {
+      background: #fff;
+    }
+
+    button {
+      cursor: pointer;
+      background: var(--brand);
+      border-color: var(--brand);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    button.secondary {
+      background: #fff;
+      color: var(--brand);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.65;
+    }
+
+    .status {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--brand-soft);
+      border-radius: 10px;
+      color: #124b45;
+      font-size: 14px;
+    }
+
+    .meta {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background: #fbfcfd;
+    }
+
+    .metric-key {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .metric-value {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+
+    .summary-item {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background: #fbfcfd;
+    }
+
+    .summary-item strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .table-wrap {
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid #e5ebef;
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    th {
+      background: #f8fafb;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 640px) {
+      .app {
+        padding: 12px;
+      }
+
+      .hero {
+        display: block;
+      }
+
+      .hero p {
+        margin-top: 0;
+      }
+    }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script>
-    const e = React.createElement;
+    const h = React.createElement;
 
     const metricLabelMap = {
-      accuracy_at_1: "Accuracy",
-      precision_at_k: "Precision",
-      recall_at_k: "Recall",
-      f1_at_k: "F1-score",
-      mrr_at_k: "MRR",
-      ndcg_at_k: "nDCG",
-      topk_hit_rate: "Top-k hit rate",
-      hallucination_rate: "Hallucination rate",
-    };
-    const fusedColumnLabelMap = {
-      rank: "순위",
-      file_name: "문서명",
-      relative_match_score: "상대 매칭 점수",
-      normalized_relevance_score: "정규화 관련도",
-      ranking_confidence_score: "리랭커 신뢰도",
-      matched_tokens: "일치 토큰",
-      title_match_count: "제목 일치 수",
-      description_match_count: "설명 일치 수",
-      tags_match_count: "태그 일치 수",
-      transcript_match_count: "전사 일치 수",
-      lexical_score: "키워드 점수",
-      semantic_score: "의미 점수",
-      final_score: "최종 융합 점수",
-      reason: "선정 사유",
-      precision: "정밀도",
-      recall: "재현율",
-      f1_score: "F1",
-      accuracy: "정확도",
-      hallucination_flag: "환각 여부",
-      search_location: "검색 위치",
-      query_preview: "미리보기",
-    };
-    const fusedColumnTooltipMap = {
-      relative_match_score: "같은 질의 내부 후보 간 상대 순위 점수입니다. top1이 100일 수 있으며 절대 정답 점수가 아닙니다.",
-      normalized_relevance_score: "최종 랭킹에 사용된 final_score를 0~100으로 표현한 값입니다. 질의 간 절대 비교용은 아닙니다.",
-      ranking_confidence_score: "리랭커가 부여한 신뢰도 점수(0~100)입니다. 리랭커 미적용 시 0입니다.",
-      final_score: "BM25 + Dense + reranker 결합 후 최종 정렬에 사용된 원점수입니다.",
+      accuracy_at_1: "Accuracy@1",
+      precision_at_k: "Precision@K",
+      recall_at_k: "Recall@K",
+      f1_at_k: "F1@K",
+      mrr_at_k: "MRR@K",
+      ndcg_at_k: "nDCG@K",
+      topk_hit_rate: "Top-K Hit Rate",
+      hallucination_rate: "Hallucination Rate",
     };
 
-    function fmt(v) {
-      if (v === null || v === undefined || v === "") return "-";
-      if (typeof v === "number") return Number(v).toFixed(4);
-      const asNum = Number(v);
-      if (!Number.isNaN(asNum) && String(v).trim() !== "") return asNum.toFixed(4);
-      return String(v);
+    const columnLabelMap = {
+      rank: "Rank",
+      file_name: "Document",
+      relative_match_score: "Relative Match",
+      normalized_relevance_score: "Normalized Relevance",
+      ranking_confidence_score: "Ranking Confidence",
+      matched_tokens: "Matched Tokens",
+      title_match_count: "Title Matches",
+      description_match_count: "Description Matches",
+      tags_match_count: "Tag Matches",
+      transcript_match_count: "Transcript Matches",
+      lexical_score: "Lexical Score",
+      semantic_score: "Semantic Score",
+      final_score: "Final Score",
+      reason: "Reason",
+      precision: "Precision",
+      recall: "Recall",
+      f1_score: "F1",
+      accuracy: "Accuracy",
+      hallucination_flag: "Hallucination",
+      search_location: "Location",
+      query_preview: "Preview",
+    };
+
+    const explainabilityLabelMap = {
+      id: "Doc ID",
+      bm25_score: "BM25",
+      minilm_score: "MiniLM",
+      e5_score: "E5",
+      normalized_bm25: "Norm BM25",
+      normalized_minilm: "Norm MiniLM",
+      normalized_e5: "Norm E5",
+      fused_score: "Fused Score",
+      reranker_score: "Reranker",
+      reranker_alpha: "Reranker Alpha",
+      rerank_anchor_overlap: "Anchor Overlap",
+      reranker_enabled: "Reranker Enabled",
+      dense_normalization_mode: "Dense Norm Mode",
+      query_normalization_mode: "Query Norm Mode",
+      adaptive_candidate_pool_k: "Adaptive Candidate Pool",
+      adaptive_rerank_top_n: "Adaptive Rerank TopN",
+      adaptive_query_bucket: "Query Bucket",
+      adaptive_semantic_need: "Semantic Need",
+      adaptive_ambiguity: "Ambiguity",
+      adaptive_reranker_value: "Adaptive Reranker",
+      fusion_weights: "Fusion Weights",
+      top_model_contribution: "Top Contribution",
+      used_fallback_tuning: "Used Fallback",
+      fallback_reason: "Fallback Reason",
+      chosen_preview_reason: "Preview Reason",
+      ranking_reason: "Ranking Reason",
+    };
+
+    function formatValue(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      if (typeof value === "number") return Number(value).toFixed(4);
+
+      const asNumber = Number(value);
+      if (!Number.isNaN(asNumber) && String(value).trim() !== "") {
+        return asNumber.toFixed(4);
+      }
+      return String(value);
     }
 
-    function MetricCards({ title, data }) {
-      if (!data || Object.keys(data).length === 0) return e("div", { className: "muted" }, title + " 없음");
-      const fields = ["accuracy_at_1","precision_at_k","recall_at_k","f1_at_k","mrr_at_k","ndcg_at_k","topk_hit_rate","hallucination_rate"];
-      return e("div", null,
-        e("h3", null, title),
-        e("div", { className:"metrics" },
-          ...fields.map((k) =>
-            e("div", { className:"metric", key:k },
-              e("div", { className:"k" }, metricLabelMap[k] || k),
-              e("div", { className:"v" }, fmt(data[k]))
+    function labelForColumn(column) {
+      return columnLabelMap[column] || explainabilityLabelMap[column] || column;
+    }
+
+    function MetricCards(props) {
+      const title = props.title;
+      const data = props.data;
+      if (!data || Object.keys(data).length === 0) {
+        return h("div", { className: "empty" }, title + ": no data");
+      }
+
+      const fields = [
+        "accuracy_at_1",
+        "precision_at_k",
+        "recall_at_k",
+        "f1_at_k",
+        "mrr_at_k",
+        "ndcg_at_k",
+        "topk_hit_rate",
+        "hallucination_rate",
+      ];
+
+      return h("div", null,
+        h("h3", null, title),
+        h("div", { className: "metrics" },
+          ...fields.map((key) =>
+            h("div", { className: "metric", key: key },
+              h("div", { className: "metric-key" }, metricLabelMap[key] || key),
+              h("div", { className: "metric-value" }, formatValue(data[key]))
             )
           )
         )
       );
     }
 
-    function DataTable({ title, table }) {
-      if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) {
-        return e("div", { className: "card" }, e("h3", null, title), e("div", { className: "muted" }, "데이터 없음"));
+    function DataTable(props) {
+      const title = props.title;
+      const table = props.table;
+      if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows) || table.columns.length === 0) {
+        return h("div", { className: "card" },
+          h("h3", null, title),
+          h("div", { className: "empty" }, "No data")
+        );
       }
-      const isFusedTopK = title === "Fused Top-K 결과";
-      const labelFor = (column) => {
-        if (!isFusedTopK) return column;
-        return fusedColumnLabelMap[column] || column;
-      };
-      const tooltipFor = (column) => {
-        if (!isFusedTopK) return "";
-        return fusedColumnTooltipMap[column] || "";
-      };
-      return e("div", { className:"card" },
-        e("h3", null, title),
-        e("div", { style:{ overflow:"auto" } },
-          e("table", null,
-            e("thead", null, e("tr", null, ...table.columns.map((c)=>e("th",{key:c, title: tooltipFor(c)},labelFor(c)))),
-            e("tbody", null, ...table.rows.map((r,i)=>e("tr",{key:i}, ...table.columns.map((c)=>e("td",{key:c}, fmt(r[c]))))))
+
+      return h("div", { className: "card" },
+        h("h3", null, title),
+        h("div", { className: "table-wrap" },
+          h("table", null,
+            h("thead", null,
+              h("tr", null,
+                ...table.columns.map((column) =>
+                  h("th", { key: column }, labelForColumn(column))
+                )
+              )
+            ),
+            h("tbody", null,
+              ...table.rows.map((row, rowIndex) =>
+                h("tr", { key: rowIndex },
+                  ...table.columns.map((column) =>
+                    h("td", { key: column }, formatValue(row[column]))
+                  )
+                )
+              )
+            )
           )
         )
       );
     }
 
-    function SearchPanel({ query, setQuery, runSearch, debug, setDebug }) {
-      return e("div", { className: "row" },
-        e("input", {
+    function SearchPanel(props) {
+      const query = props.query;
+      const setQuery = props.setQuery;
+      const runSearch = props.runSearch;
+      const debug = props.debug;
+      const setDebug = props.setDebug;
+      const loading = props.loading;
+
+      return h("div", { className: "row" },
+        h("input", {
+          type: "search",
           style: { flex: "1 1 420px" },
           value: query,
-          onChange: (ev) => setQuery(ev.target.value),
-          placeholder: "검색어 입력",
+          onChange: (event) => setQuery(event.target.value),
+          placeholder: "Enter search text",
         }),
-        e("button", { onClick: runSearch }, "검색 실행"),
-        e("button", { className: "secondary", onClick: () => setDebug(!debug) }, debug ? "Debug 숨김" : "Debug 보기")
+        h("button", { onClick: runSearch, disabled: loading }, loading ? "Searching..." : "Search"),
+        h("button", {
+          className: "secondary",
+          onClick: () => setDebug(!debug),
+          disabled: loading,
+        }, debug ? "Debug On" : "Debug Off")
       );
     }
 
-    function UploadPanel({ setQuery, setStatus }) {
+    function UploadPanel(props) {
+      const setQuery = props.setQuery;
+      const setStatus = props.setStatus;
+      const loading = props.loading;
       const [file, setFile] = React.useState(null);
+
       const upload = async () => {
-        if (!file) { setStatus("업로드할 파일을 선택하세요."); return; }
-        setStatus("업로드 및 STT 처리 중...");
-        const fd = new FormData();
-        fd.append("file", file);
-        const resp = await fetch("/api/upload", { method:"POST", body: fd });
-        const d = await resp.json();
-        if (!d.ok) { setStatus(d.error || "업로드 실패"); return; }
-        setStatus("업로드 완료: " + (d.title || d.docId || ""));
-        if (d.searchQuery) setQuery(d.searchQuery);
+        if (!file) {
+          setStatus("Choose an MP4 or WAV file first.");
+          return;
+        }
+
+        setStatus("Uploading file and running STT...");
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+          const response = await fetch("/api/upload", {
+            method: "POST",
+            body: formData,
+          });
+          const data = await response.json();
+          if (!data.ok) {
+            setStatus(data.error || "Upload failed.");
+            return;
+          }
+
+          setStatus("Upload complete: " + (data.title || data.docId || file.name));
+          if (data.searchQuery) {
+            setQuery(data.searchQuery);
+          }
+        } catch (error) {
+          setStatus("Upload failed: " + String(error));
+        }
       };
-      return e("div", { className: "row" },
-        e("input", { type:"file", accept:".mp4,.wav,video/mp4,audio/wav,audio/x-wav", onChange:(ev)=>setFile(ev.target.files?.[0] || null) }),
-        e("button", { className: "secondary", onClick: upload }, "파일 업로드")
+
+      return h("div", { className: "row" },
+        h("input", {
+          type: "file",
+          accept: ".mp4,.wav,video/mp4,audio/wav,audio/x-wav",
+          onChange: (event) => setFile(event.target.files && event.target.files[0] ? event.target.files[0] : null),
+        }),
+        h("button", { className: "secondary", onClick: upload, disabled: loading }, "Upload")
+      );
+    }
+
+    function SummaryPanel(props) {
+      const selection = props.selection;
+      if (!selection) return null;
+
+      return h("div", { className: "card" },
+        h("h3", null, "Final Fused Result"),
+        h("div", { className: "summary-grid" },
+          h("div", { className: "summary-item" },
+            h("strong", null, "Document"),
+            h("div", null, selection.file_name || "-")
+          ),
+          h("div", { className: "summary-item" },
+            h("strong", null, "Relative Match"),
+            h("div", null, formatValue(selection.relative_match_score))
+          ),
+          h("div", { className: "summary-item" },
+            h("strong", null, "Normalized Relevance"),
+            h("div", null, formatValue(selection.normalized_relevance_score))
+          ),
+          h("div", { className: "summary-item" },
+            h("strong", null, "Ranking Confidence"),
+            h("div", null, formatValue(selection.ranking_confidence_score))
+          ),
+          h("div", { className: "summary-item" },
+            h("strong", null, "Preview"),
+            h("div", null, selection.preview || "-")
+          ),
+          h("div", { className: "summary-item" },
+            h("strong", null, "Ranking Reason"),
+            h("div", null, selection.ranking_reason || "-")
+          )
+        )
       );
     }
 
     function App() {
       const [query, setQuery] = React.useState("");
-      const [status, setStatus] = React.useState("초기화 중...");
+      const [status, setStatus] = React.useState("Loading dashboard...");
       const [options, setOptions] = React.useState(null);
       const [result, setResult] = React.useState(null);
       const [debug, setDebug] = React.useState(false);
+      const [loading, setLoading] = React.useState(false);
 
       React.useEffect(() => {
         fetch("/api/options")
-          .then((r) => r.json())
-          .then((d) => {
-            setOptions(d);
-            setStatus("준비 완료");
+          .then((response) => response.json())
+          .then((data) => {
+            setOptions(data);
+            setStatus("Ready.");
           })
-          .catch((err) => setStatus("초기화 실패: " + String(err)));
+          .catch((error) => {
+            setStatus("Failed to load options: " + String(error));
+          });
       }, []);
 
       const runSearch = async () => {
-        if (!query.trim()) { setStatus("검색어를 입력하세요."); return; }
-        setStatus("검색 중...");
+        if (!query.trim()) {
+          setStatus("Enter a query first.");
+          return;
+        }
+
+        setLoading(true);
+        setStatus("Searching...");
+
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 90000);
-          const started = performance.now();
-          const resp = await fetch("/api/search", {
+          const startedAt = performance.now();
+
+          const response = await fetch("/api/search", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query, debugMode: debug, includeDetails: debug }),
+            body: JSON.stringify({
+              query: query,
+              debugMode: debug,
+              includeDetails: debug,
+            }),
             signal: controller.signal,
           });
+
           clearTimeout(timeout);
-          const d = await resp.json();
-          if (!d.ok) { setStatus(d.error || "검색 실패"); return; }
-          setResult(d);
-          const elapsedMs = Math.round(performance.now() - started);
-          setStatus(`검색 완료 (${elapsedMs}ms)`);
-        } catch (err) {
-          const message = err && err.name === "AbortError" ? "검색 시간이 초과되었습니다. 질의를 단순화하거나 Debug를 끄고 다시 시도하세요." : ("검색 실패: " + String(err));
-          setStatus(message);
+          const data = await response.json();
+          if (!data.ok) {
+            setStatus(data.error || "Search failed.");
+            setLoading(false);
+            return;
+          }
+
+          setResult(data);
+          setStatus("Search complete (" + Math.round(performance.now() - startedAt) + "ms)");
+        } catch (error) {
+          if (error && error.name === "AbortError") {
+            setStatus("Search timed out after 90 seconds.");
+          } else {
+            setStatus("Search failed: " + String(error));
+          }
+        } finally {
+          setLoading(false);
         }
       };
 
-      const device = result?.device?.device || options?.device?.device || "unknown";
-      const docCount = result?.dataset?.documentCount ?? options?.documentCount ?? 0;
+      const device = (result && result.device && result.device.device) || (options && options.device && options.device.device) || "unknown";
+      const documentCount = (result && result.dataset && result.dataset.documentCount) ?? (options && options.documentCount) ?? 0;
 
-      return e("div", { className: "app" },
-        e("div", { className: "card" },
-          e("h2", null, "Fused 단일 검색 모델"),
-          e(SearchPanel, { query, setQuery, runSearch, debug, setDebug }),
-          e("div", { style: { height: "8px" } }),
-          e(UploadPanel, { setQuery, setStatus }),
-          e("div", { className: "status muted" }, status),
-          e("div", { className: "muted" }, "Device: " + device + " | 문서 수: " + docCount)
-        ),
-        result ? e("div", null,
-          e("div", { className: "card" },
-            e("h3", null, "최종 Fused 결과"),
-            e("div", { className: "muted" }, "선택 문서: " + (result.finalFusedSelection?.file_name || "-")),
-            e("div", { className: "muted" }, "relative_match_score: " + fmt(result.finalFusedSelection?.relative_match_score)),
-            e("div", { className: "muted" }, "normalized_relevance_score: " + fmt(result.finalFusedSelection?.normalized_relevance_score)),
-            e("div", { className: "muted" }, "ranking_confidence_score: " + fmt(result.finalFusedSelection?.ranking_confidence_score)),
-            e("div", { className: "muted" }, "preview: " + (result.finalFusedSelection?.preview || "-")),
-            e("div", { className: "muted" }, "BM25 + MiniLM + E5 정규화 및 adaptive 가중치 기반 단일 결과")
+      return h("div", { className: "app" },
+        h("div", { className: "card hero" },
+          h("div", null,
+            h("h1", null, "Fused Retrieval Dashboard"),
+            h("p", { className: "muted" }, "React UMD frontend served by the local Python API.")
           ),
-          debug ? e("div", { className: "card" },
-            e(MetricCards, { title: "현재 질의 기준 Fused 성능 요약", data: result.fusedCurrentMetrics }),
-            e("div", { style: { height: "12px" } }),
-            e(MetricCards, { title: "전체 데이터셋 기준 Fused 누적 성능 요약", data: result.fusedGlobalMetrics })
+          h("div", { className: "meta" },
+            h("span", null, "Device: " + device),
+            h("span", null, "Documents: " + documentCount)
+          )
+        ),
+        h("div", { className: "card" },
+          h("h2", null, "Search"),
+          h(SearchPanel, {
+            query: query,
+            setQuery: setQuery,
+            runSearch: runSearch,
+            debug: debug,
+            setDebug: setDebug,
+            loading: loading,
+          }),
+          h("div", { style: { height: "10px" } }),
+          h(UploadPanel, {
+            setQuery: setQuery,
+            setStatus: setStatus,
+            loading: loading,
+          }),
+          h("div", { className: "status" }, status)
+        ),
+        result ? h("div", null,
+          h(SummaryPanel, { selection: result.finalFusedSelection }),
+          debug ? h("div", { className: "card" },
+            h(MetricCards, { title: "Current Query Metrics", data: result.fusedCurrentMetrics }),
+            h("div", { style: { height: "14px" } }),
+            h(MetricCards, { title: "Global Fused Metrics", data: result.fusedGlobalMetrics })
           ) : null,
-          e(DataTable, { title: "Fused Top-K 결과", table: result.tables?.fused }),
-          e(DataTable, { title: "Explainability / Fusion Weights", table: result.fusedExplainability }),
-          debug ? e("div", null,
-            e("div", { className: "card" },
-              e("h3", null, "평가 상태 (Debug 전용)"),
-              e("div", { className: "muted" }, result.relevantSummary || ""),
-              e("div", { className: "muted" }, result.evaluationStatus?.message || ""),
-              e("div", { className: "muted" }, "has_ground_truth: " + String(result.evaluationStatus?.has_ground_truth))
+          h(DataTable, { title: "Fused Top-K Results", table: result.tables && result.tables.fused }),
+          h(DataTable, { title: "Explainability / Fusion Weights", table: result.fusedExplainability }),
+          debug ? h("div", null,
+            h("div", { className: "card" },
+              h("h3", null, "Evaluation Status"),
+              h("p", { className: "muted" }, result.relevantSummary || "No relevant summary."),
+              h("p", { className: "muted" }, result.evaluationStatus && result.evaluationStatus.message ? result.evaluationStatus.message : "No evaluation message."),
+              h("p", { className: "muted" }, "Has ground truth: " + String(result.evaluationStatus && result.evaluationStatus.has_ground_truth))
             ),
-            e(DataTable, { title: "BM25 (Debug)", table: result.tables?.keyword }),
-            e(DataTable, { title: "MiniLM (Debug)", table: result.tables?.denseA }),
-            e(DataTable, { title: "E5 (Debug)", table: result.tables?.denseB })
+            h(DataTable, { title: "BM25 Debug", table: result.tables && result.tables.keyword }),
+            h(DataTable, { title: "MiniLM Debug", table: result.tables && result.tables.denseA }),
+            h(DataTable, { title: "E5 Debug", table: result.tables && result.tables.denseB })
           ) : null
         ) : null
       );
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(e(App));
+    ReactDOM.createRoot(document.getElementById("root")).render(h(App));
   </script>
 </body>
 </html>

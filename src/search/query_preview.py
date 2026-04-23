@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""키워드 검색과 밀집 검색 결과에 대한 짧은 근거 미리보기를 만든다.
+
+대시보드에서는 순위만으로는 충분하지 않다. 왜 문서가 검색되었는지 한눈에
+보여줄 짧은 스니펫이 필요하므로, 이 모듈이 문장 단위 match payload 또는
+문서 전체 텍스트를 읽어 사람이 읽기 좋은 미리보기로 바꿔 준다.
+"""
+
 import re
 from typing import Any, Mapping
 
@@ -11,6 +18,8 @@ PREVIEW_LENGTH_RANGE = (80, 240)
 
 
 def _payload_value(payload: Mapping[str, Any] | None, key: str) -> str:
+    """선택적 match payload를 방어적으로 읽고 텍스트를 정규화한다."""
+
     if not payload:
         return ""
     value = payload.get(key, "")
@@ -20,6 +29,13 @@ def _payload_value(payload: Mapping[str, Any] | None, key: str) -> str:
 
 
 def _resolve_preview_length(text: str, query: str, requested_length: int | None = None, search_mode: str = "generic") -> int:
+    """질의 복잡도와 텍스트 형태에 맞춰 미리보기 길이를 정한다.
+
+    너무 짧으면 근거 구간이 잘리고, 너무 길면 UI에서 잡음이 많아진다.
+    그래서 상한과 하한은 유지하되 질의 길이와 문장 길이에 반응하는
+    휴리스틱을 여기서 적용한다.
+    """
+
     if requested_length is not None:
         return max(PREVIEW_LENGTH_RANGE[0], min(PREVIEW_LENGTH_RANGE[1], int(requested_length)))
     normalized = normalize_text_for_search(text)
@@ -28,11 +44,15 @@ def _resolve_preview_length(text: str, query: str, requested_length: int | None 
     avg_sentence = sum(sentence_lengths) / max(1, len(sentence_lengths)) if sentence_lengths else len(normalized)
     base = 90 + (0.35 * min(avg_sentence, 180)) + (7 * len(query_tokens))
     if search_mode == "dense":
+        # 밀집 검색은 정확한 토큰 일치보다 의역 기반 근거가 많아서
+        # 약간 더 넓은 문맥 창을 주는 편이 사람이 이해하기 쉽다.
         base += 20
     return int(max(PREVIEW_LENGTH_RANGE[0], min(PREVIEW_LENGTH_RANGE[1], round(base))))
 
 
 def _build_snippet(text: str, max_length: int, anchor_start: int | None = None, anchor_end: int | None = None) -> str:
+    """선택적 anchor를 중심으로 UI 친화적인 길이의 스니펫을 만든다."""
+
     normalized = normalize_text_for_search(text)
     if not normalized:
         return ""
@@ -57,6 +77,8 @@ def _build_snippet(text: str, max_length: int, anchor_start: int | None = None, 
     start = max(0, anchor_start - left_extra)
     end = min(len(normalized), anchor_end + right_extra)
 
+    # 토큰 중간에서 끊기면 사람이 읽기 어렵기 때문에
+    # 가능한 범위에서 단어 경계로 확장한다.
     if start > 0:
         prev_space = normalized.rfind(" ", max(0, start - 20), start)
         if prev_space >= 0:
@@ -79,6 +101,8 @@ def _build_snippet(text: str, max_length: int, anchor_start: int | None = None, 
 
 
 def _find_anchor(text: str, anchor_text: str) -> tuple[int, int] | None:
+    """정규화된 텍스트 안에서 정규화된 anchor 구간의 위치를 찾는다."""
+
     normalized_text = normalize_text_for_search(text)
     normalized_anchor = normalize_text_for_search(anchor_text)
     if not normalized_text or not normalized_anchor:
@@ -91,6 +115,8 @@ def _find_anchor(text: str, anchor_text: str) -> tuple[int, int] | None:
 
 
 def _best_keyword_window(text: str, query: str, max_length: int) -> str:
+    """질의 토큰이 가장 밀집된 구간을 선택한다."""
+
     normalized = normalize_text_for_search(text)
     if not normalized:
         return ""
@@ -133,6 +159,8 @@ def _best_keyword_window(text: str, query: str, max_length: int) -> str:
 
 
 def _best_overlap_chunk(text: str, query: str, max_length: int) -> str:
+    """명시적 anchor가 없을 때 겹침도가 가장 높은 구간을 대체로 선택한다."""
+
     normalized = normalize_text_for_search(text)
     if not normalized:
         return ""
@@ -167,6 +195,12 @@ def extract_keyword_preview(
     length: int | None = None,
     match_payload: Mapping[str, Any] | None = None,
 ) -> str:
+    """어휘 기반 검색 근거와 정렬된 미리보기를 만든다.
+
+    키워드 검색은 보통 토큰 anchor가 분명하므로, 약한 fallback보다
+    먼저 정확한 match payload와 토큰 밀집 구간을 우선 사용한다.
+    """
+
     normalized_text = normalize_text_for_search(text)
     preview_length = _resolve_preview_length(normalized_text, query, requested_length=length, search_mode="keyword")
 
@@ -207,6 +241,8 @@ def extract_dense_preview(
     length: int | None = None,
     match_payload: Mapping[str, Any] | None = None,
 ) -> str:
+    """정확한 토큰 겹침이 약한 밀집 검색용 미리보기를 만든다."""
+
     normalized_text = normalize_text_for_search(text)
     preview_length = _resolve_preview_length(normalized_text, query, requested_length=length, search_mode="dense")
 

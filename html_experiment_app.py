@@ -84,6 +84,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 ROOT_DIR = Path(__file__).resolve().parent
 HTML_PATH = ROOT_DIR / "web" / "experiment_dashboard.html"
+FAVICON_PATH = ROOT_DIR / "web" / "favicon.svg"
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
 if sys.stderr is None:
@@ -469,11 +470,24 @@ def build_query_summary(system_name: str, annotated: pd.DataFrame, relevant_ids:
     }
 
 
+def _relative_match_scale(values: pd.Series | np.ndarray | list[float]) -> float:
+    array = np.asarray(values, dtype=np.float32)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return 0.0
+    ordered = np.sort(array)
+    top1 = float(ordered[-1])
+    pivot = float(ordered[max(0, len(ordered) - min(5, len(ordered)))])
+    span = abs(top1) + abs(pivot) + 1e-9
+    return float(max(0.0, min(1.0, (top1 - pivot) / span)))
+
+
 def build_search_table(annotated: pd.DataFrame) -> pd.DataFrame:
     display = annotated.copy()
+    relative_scale = _relative_match_scale(display["final_score"].astype(float).to_numpy()) if "final_score" in display.columns else 1.0
     if "similarity_score" in display.columns:
-        # query-internal relative ranking score (top row can be 100)
-        display["relative_match_score"] = display["similarity_score"].astype(float)
+        # Query-relative rank is scaled by candidate separation so weak/no-match queries do not show 100 by default.
+        display["relative_match_score"] = display["similarity_score"].astype(float) * relative_scale
     if "final_score" in display.columns:
         # absolute-ish fused/engine score for this query (not min-max top1 fixed 100)
         display["normalized_relevance_score"] = display["final_score"].astype(float) * 100.0
@@ -1195,10 +1209,11 @@ def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
     fused_current_metrics = _json_safe(fused_current.iloc[0].to_dict()) if not fused_current.empty else {}
     has_ground_truth = bool(fused_current_metrics.get("has_ground_truth", False))
     fused_top1_row = fused_table.iloc[0] if not fused_table.empty else pd.Series(dtype=object)
+    fused_relative_scale = _relative_match_scale(fused_table["final_score"].astype(float).to_numpy()) if "final_score" in fused_table.columns else 1.0
     final_selection = {
         "doc_id": str(fused_top1_row.get("id", "")),
         "file_name": str(fused_top1_row.get("file_name", "")),
-        "relative_match_score": float(fused_top1_row.get("similarity_score", 0.0) or 0.0),
+        "relative_match_score": float(fused_top1_row.get("similarity_score", 0.0) or 0.0) * fused_relative_scale,
         "normalized_relevance_score": float(fused_top1_row.get("final_score", 0.0) or 0.0) * 100.0,
         "final_score": float(fused_top1_row.get("final_score", 0.0) or 0.0),
         "reranker_score": float(fused_top1_row.get("reranker_score", 0.0) or 0.0),
@@ -1437,6 +1452,11 @@ class ExperimentHtmlHandler(BaseHTTPRequestHandler):
         content = json.dumps(_json_safe(payload), ensure_ascii=False).encode("utf-8")
         self._send_bytes(content, "application/json; charset=utf-8", status=status)
 
+    def _send_empty(self, status: int = 204) -> None:
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or 0)
         if length <= 0:
@@ -1447,6 +1467,12 @@ class ExperimentHtmlHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            if path in {"/favicon.ico", "/favicon.svg"}:
+                if FAVICON_PATH.exists():
+                    self._send_bytes(FAVICON_PATH.read_bytes(), "image/svg+xml; charset=utf-8")
+                else:
+                    self._send_empty()
+                return
             if path in {"/", "/index.html", "/experiment_dashboard.html"}:
                 self._send_bytes(HTML_PATH.read_bytes(), "text/html; charset=utf-8")
                 return
